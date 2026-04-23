@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import uvicorn
 import asyncio
 
@@ -20,12 +20,34 @@ async def shutdown():
     drift_engine.stop()
     await db.disconnect()
 
+class QueryRequest(BaseModel):
+    sql: str
+
 class ClaimReview(BaseModel):
     verdict: bool  # True for valid, False for reject
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.post("/query")
+async def execute_query(request: QueryRequest):
+    """
+    Read-only SQL execution endpoint for the Oversight Agent's LangGraph nodes.
+    Blocks any write statements (INSERT/UPDATE/DELETE/ALTER/DROP).
+    Returns rows as a list of dicts, or an error dict with the exception type.
+    """
+    stmt = request.sql.strip().upper()
+    forbidden = ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE")
+    if any(stmt.startswith(kw) for kw in forbidden):
+        raise HTTPException(status_code=403, detail="Only SELECT and information_schema queries are permitted.")
+    try:
+        records = await db.fetch(request.sql)
+        return {"status": "ok", "rows": [dict(r) for r in records]}
+    except Exception as e:
+        error_type = type(e).__name__
+        return {"status": "error", "error_type": error_type, "detail": str(e)}
+
 
 @app.get("/claims/pending", response_model=List[dict])
 async def get_pending_claims():

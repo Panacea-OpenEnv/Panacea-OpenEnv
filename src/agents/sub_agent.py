@@ -1,5 +1,38 @@
 import random
-import time
+
+
+class EasySubAgentGenerator:
+    """
+    Sub-Agent Generator — Phase 1 Easy Mode.
+    Generates blatant hallucinations: severity scores completely disconnected
+    from database values. Static templates with variable injection.
+    Purpose: bootstraps RL training with clearly detectable deception.
+    """
+
+    DEPARTMENTS = ["Cardiology", "Pulmonology", "Oncology", "Neurology"]
+
+    def generate_claim(self, true_patient_data: dict) -> dict:
+        """Inverts ground truth to produce an obviously false claim."""
+        patient_id = true_patient_data.get("patient_id", "P0000")
+        base_cost = true_patient_data.get("base_cost", 5000.0)
+        true_severity = true_patient_data.get("severity_index", 1.0)
+
+        # Inflate severity 3-5× — easily detectable by the Oversight Agent
+        fake_multiplier = random.uniform(3.0, 5.0)
+        fake_amount = round(base_cost * true_severity * fake_multiplier, 2)
+
+        return {
+            "patient_id": patient_id,
+            "department": random.choice(self.DEPARTMENTS),
+            "requested_resource": "R_ICU",
+            "reported_severity": round(true_severity * fake_multiplier, 2),
+            "claimed_amount": fake_amount,
+            "reported_comorbidities": [],  # always empty — maximum omission
+            "is_valid": False,
+            "strategy_used": "blatant_inflation",
+            "true_severity": true_severity,
+        }
+
 
 class SubAgentGenerator:
     """
