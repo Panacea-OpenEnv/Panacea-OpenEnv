@@ -408,7 +408,8 @@ def train(model, tokenizer, dataset):
         fp16                        = not torch.cuda.is_bf16_supported(),
         bf16                        = torch.cuda.is_bf16_supported(),
         logging_steps               = 5,
-        save_strategy               = "epoch",
+        save_strategy               = "steps",
+        save_steps                  = 10,       # checkpoint every 10 steps — survive disconnects
         report_to                   = "none",
         num_generations             = 2,        # was 4 — halves generation time per step
         beta                        = 0.04,
