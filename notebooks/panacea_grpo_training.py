@@ -319,7 +319,7 @@ def _print_distribution(split):
 
 # Run ONE of these:
 # dataset = build_dataset_from_jsonl("data/gpt4o_reports.jsonl")  # Recommended
-dataset = build_dataset_static(n=2000)                          # Fallback
+dataset = build_dataset_static(n=150)                          # HACKATHON SPEED: 150 episodes
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -374,12 +374,12 @@ def train(model, tokenizer, dataset):
         output_dir             = "./panacea_grpo_out",
         num_train_epochs       = 1,
         per_device_train_batch_size = 2,
-        gradient_accumulation_steps = 4,
+        gradient_accumulation_steps = 2,    # Reduced for speed
         learning_rate          = 5e-6,
-        num_generations        = 4,
-        max_completion_length  = 256,
+        num_generations        = 2,         # HACKATHON SPEED: Only generate 2 completions per prompt
+        max_completion_length  = 64,        # HACKATHON SPEED: Oversight agent only needs ~30 tokens for a verdict
         max_prompt_length      = 1024,
-        logging_steps          = 5,
+        logging_steps          = 1,
         save_steps             = 100,
         seed                   = 42,
         report_to              = "none",
