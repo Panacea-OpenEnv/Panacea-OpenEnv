@@ -370,17 +370,22 @@ def train(model, tokenizer, dataset):
 
     oversight_reward_fn, format_reward_fn = make_reward_fns()
 
+    batch_size = 2
+    grad_accum = 2
+    total_steps = len(dataset["train"]) // (batch_size * grad_accum)
+    save_steps_1_percent = max(1, total_steps // 100)
+
     args = GRPOConfig(
         output_dir             = "./panacea_grpo_out",
         num_train_epochs       = 1,
-        per_device_train_batch_size = 2,
-        gradient_accumulation_steps = 2,    # Reduced for speed
+        per_device_train_batch_size = batch_size,
+        gradient_accumulation_steps = grad_accum,
         learning_rate          = 5e-6,
         num_generations        = 2,         # HACKATHON SPEED: Only generate 2 completions per prompt
         max_completion_length  = 64,        # HACKATHON SPEED: Oversight agent only needs ~30 tokens for a verdict
         max_prompt_length      = 1024,
         logging_steps          = 1,
-        save_steps             = 100,
+        save_steps             = save_steps_1_percent,
         seed                   = 42,
         report_to              = "none",
         remove_unused_columns  = False,  # Required: dataset has extra columns
