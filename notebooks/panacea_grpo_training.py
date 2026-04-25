@@ -265,7 +265,7 @@ def build_dataset(n: int = 2000) -> list[dict]:
 def build_hf_dataset():
     from datasets import Dataset
 
-    raw = build_dataset(2000)
+    raw = build_dataset(500)   # 500 episodes → ~84 steps per epoch on T4
     ds  = Dataset.from_list(raw).train_test_split(test_size=0.1, seed=42)
 
     counts = Counter(r["deception_type"] for r in raw)
@@ -397,7 +397,7 @@ def train(model, tokenizer, dataset):
 
     base_kwargs = dict(
         output_dir                  = "panacea_oversight_model",
-        num_train_epochs            = 3,
+        num_train_epochs            = 1,   # 1 epoch fits in free Colab session (~50 min)
         per_device_train_batch_size = 1,        # reduced: less VRAM per generation step
         gradient_accumulation_steps = 16,       # keep effective batch = 16
         learning_rate               = 2e-5,
