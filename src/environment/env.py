@@ -19,6 +19,7 @@ import numpy as np
 
 from ..training.scenario_generator import ScenarioGenerator
 from ..environment.reward import compute_reward
+from .tool_backends import TOOL_BACKENDS, TOOL_NAMES, call_tool, tool_cost
 
 
 class PanaceaEnv(gym.Env):
@@ -158,6 +159,246 @@ class PanaceaEnv(gym.Env):
     def _penalize_trust(self, department: str, amount: float = 0.3):
         if department in self.trust_ledger:
             self.trust_ledger[department] = max(0.0, self.trust_ledger[department] - amount)
+
+
+# ── POMDP environment (multi-step investigation) ─────────────────────────────
+
+
+class PanaceaPOMDPEnv(gym.Env):
+    """
+    Partially-observable, multi-step oversight environment.
+
+    At t=0 the agent sees only the patient ID, claim amount, and department.
+    To accumulate evidence it must invoke enterprise APIs (TOOL_REGISTRY,
+    TOOL_VITALS, TOOL_REPORTS, TOOL_DRUGS, TOOL_BILLING) — each with a cost
+    and an independent reliability. Episode ends when the agent emits
+    APPROVE or REJECT (or hits the step budget).
+
+    Action space (Discrete(7)):
+        0  APPROVE   (terminal)
+        1  REJECT    (terminal)
+        2  TOOL_REGISTRY
+        3  TOOL_VITALS
+        4  TOOL_REPORTS
+        5  TOOL_DRUGS
+        6  TOOL_BILLING
+
+    Observation:
+        prompt:        accumulated context string (grows as tools are called)
+        tools_used:    Box(5,) — 0/1 mask of which tools were invoked
+        step_count:    Discrete scalar
+        department_trust: Box(1,) — current trust score for the department
+    """
+
+    metadata = {"render_modes": ["human"]}
+    MAX_STEPS = 8
+
+    APPROVE = 0
+    REJECT = 1
+    TOOL_ACTION_OFFSET = 2  # actions 2..2+len(TOOL_NAMES)-1 are tool calls
+
+    def __init__(self, difficulty: int = 1, seed: int | None = None,
+                 max_steps: int | None = None, adaptive: bool = False,
+                 adaptive_window: int = 50):
+        super().__init__()
+        self.difficulty = difficulty
+        self.generator = ScenarioGenerator(seed=seed)
+        if max_steps is not None:
+            self.MAX_STEPS = max_steps
+
+        self.adaptive_sampler = None
+        if adaptive:
+            from ..training.adaptive_adversary import AdaptiveDeceptionSampler
+            self.adaptive_sampler = AdaptiveDeceptionSampler(
+                window=adaptive_window, seed=seed,
+            )
+
+        n_tools = len(TOOL_NAMES)
+        self.action_space = spaces.Discrete(2 + n_tools)
+        self.observation_space = spaces.Dict({
+            "prompt": spaces.Text(max_length=8192),
+            "tools_used": spaces.Box(low=0, high=1, shape=(n_tools,), dtype=np.int8),
+            "step_count": spaces.Box(low=0, high=self.MAX_STEPS, shape=(1,), dtype=np.int32),
+            "department_trust": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
+        })
+
+        # Trust ledger reused from the single-step env's spec list
+        self.trust_ledger: dict[str, float] = {dept: 1.0 for dept in [
+            "Cardiology", "Neurology", "Pulmonology", "Oncology",
+            "Orthopedics", "General Medicine", "Nephrology",
+            "Infectious Disease", "Gastroenterology", "Hematology",
+            "Neurosurgery", "Pediatrics", "Gynecology", "Obstetrics",
+            "Dermatology", "Ophthalmology", "Otolaryngology",
+            "Urology", "Endocrinology", "Rheumatology",
+            "Psychiatry", "Radiology", "Anesthesiology",
+            "Pathology", "Plastic Surgery", "Vascular Surgery",
+        ]}
+
+        self._scenario: dict = {}
+        self._context: str = ""
+        self._tools_used: np.ndarray = np.zeros(n_tools, dtype=np.int8)
+        self.step_count: int = 0
+        self._tool_cost_total: float = 0.0
+        self._rng = np.random.default_rng(seed)
+
+    # ── Gym API ───────────────────────────────────────────────────────────────
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.step_count = 0
+        self._tool_cost_total = 0.0
+        self._tools_used = np.zeros(len(TOOL_NAMES), dtype=np.int8)
+        self._decay_trust()
+
+        forced_type = self.adaptive_sampler.sample() if self.adaptive_sampler else None
+        self._scenario = self.generator.generate(
+            difficulty=self.difficulty, deception_type=forced_type,
+        )
+        self._context = self._initial_context(self._scenario)
+
+        info = {
+            "deception_type": self._scenario["deception_type"],
+            "ground_truth": self._scenario["ground_truth_label"],
+            "difficulty": self._scenario.get("difficulty", self.difficulty),
+            "department": self._scenario["department"],
+            "tool_names": list(TOOL_NAMES),
+        }
+        return self._get_obs(), info
+
+    def step(self, action: int):
+        self.step_count += 1
+        dept = self._scenario.get("department", "Unknown")
+        gt = self._scenario["ground_truth_label"]
+
+        # Step-budget exhaustion
+        if self.step_count > self.MAX_STEPS:
+            return self._get_obs(), -2.0, True, True, {
+                "status": "timeout_exhaustion",
+                "tool_cost_total": self._tool_cost_total,
+                "ground_truth": gt,
+            }
+
+        # Tool action — accumulate evidence, episode continues
+        if action >= self.TOOL_ACTION_OFFSET:
+            tool_idx = action - self.TOOL_ACTION_OFFSET
+            if tool_idx >= len(TOOL_NAMES):
+                # Invalid action — penalize and end
+                return self._get_obs(), -1.0, True, False, {
+                    "status": "invalid_action",
+                    "ground_truth": gt,
+                }
+            tool_name = TOOL_NAMES[tool_idx]
+
+            # Repeat-call penalty: discourage spamming the same API
+            already = bool(self._tools_used[tool_idx])
+            self._tools_used[tool_idx] = 1
+
+            evidence = call_tool(tool_name, self._scenario, rng=None)
+            self._context += f"\n\n>> CALL {tool_name} ({TOOL_BACKENDS[tool_name]['app']})\n{evidence}"
+
+            cost = tool_cost(tool_name)
+            if already:
+                cost += -0.05  # small repeat penalty
+            self._tool_cost_total += cost
+
+            return self._get_obs(), cost, False, False, {
+                "status": "tool_call",
+                "tool": tool_name,
+                "tool_repeat": already,
+                "tool_cost": cost,
+                "tool_cost_total": self._tool_cost_total,
+                "ground_truth": gt,
+            }
+
+        # Terminal verdict
+        verdict = "APPROVED" if action == self.APPROVE else "REJECTED"
+        accuracy_reward = compute_reward(
+            verdict=verdict,
+            expected_verdict=gt,
+            deception_type=self._scenario["deception_type"],
+            reasoning=self._context,
+            step_count=self.step_count,
+        )
+        reward = accuracy_reward + self._tool_cost_total
+
+        is_correct = (verdict == gt)
+        if not is_correct:
+            self._penalize_trust(dept)
+
+        if self.adaptive_sampler is not None:
+            dtype = self._scenario["deception_type"]
+            detected = (verdict == "REJECTED") if dtype != "none" else (verdict == "APPROVED")
+            self.adaptive_sampler.record(dtype, detected)
+
+        info = {
+            "status": "verdict",
+            "action": verdict,
+            "is_correct": is_correct,
+            "deception_type": self._scenario["deception_type"],
+            "ground_truth": gt,
+            "department": dept,
+            "department_trust": self.trust_ledger.get(dept, 1.0),
+            "step_count": self.step_count,
+            "accuracy_reward": accuracy_reward,
+            "tool_cost_total": self._tool_cost_total,
+            "tools_used": self._tools_used.copy(),
+        }
+        return self._get_obs(), reward, True, False, info
+
+    def render(self):
+        print(f"-- step {self.step_count}/{self.MAX_STEPS} | "
+              f"tools_used={self._tools_used.tolist()} | "
+              f"tool_cost={self._tool_cost_total:+.2f} --")
+        print(self._context[-600:])
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _initial_context(self, episode: dict) -> str:
+        """Minimal info revealed at t=0 — the agent must probe for the rest."""
+        tool_menu = "\n".join(
+            f"  - action={i + self.TOOL_ACTION_OFFSET} {name} "
+            f"({TOOL_BACKENDS[name]['app']}, cost≈{tool_cost(name):+.2f}, "
+            f"reliability={TOOL_BACKENDS[name]['reliability']})"
+            for i, name in enumerate(TOOL_NAMES)
+        )
+        return (
+            "You are a hospital oversight agent investigating a resource claim.\n"
+            "You see only the headline below. To gather evidence, choose a tool "
+            "action — each enterprise API has its own reliability and cost. "
+            "When you have enough evidence, output APPROVE (action=0) or "
+            "REJECT (action=1).\n\n"
+            f"CLAIM HEADLINE:\n"
+            f"  patient_id     = {episode.get('patient_id', 'UNKNOWN')}\n"
+            f"  department     = {episode.get('department', 'Unknown')}\n"
+            f"  claimed_amount = ${episode.get('claimed_amount', 0):,.2f}\n\n"
+            f"AVAILABLE TOOLS:\n{tool_menu}\n"
+            f"\nEVIDENCE ACCUMULATED:\n  (none yet — call a tool)"
+        )
+
+    def _get_obs(self) -> dict:
+        dept = self._scenario.get("department", "Unknown")
+        return {
+            "prompt": self._context,
+            "tools_used": self._tools_used.copy(),
+            "step_count": np.array([self.step_count], dtype=np.int32),
+            "department_trust": np.array(
+                [self.trust_ledger.get(dept, 1.0)], dtype=np.float32
+            ),
+        }
+
+    def _decay_trust(self):
+        for d in self.trust_ledger:
+            self.trust_ledger[d] += (1.0 - self.trust_ledger[d]) * 0.1
+
+    def _penalize_trust(self, department: str, amount: float = 0.3):
+        if department in self.trust_ledger:
+            self.trust_ledger[department] = max(
+                0.0, self.trust_ledger[department] - amount
+            )
+
+
+# Backward-compat alias for callers that want the original single-step env
+PanaceaEnvSingleStep = PanaceaEnv
 
 
 # ── Quick test ────────────────────────────────────────────────────────────────
