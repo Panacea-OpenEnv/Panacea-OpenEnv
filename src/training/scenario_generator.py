@@ -15,8 +15,9 @@ Usage:
   # episode = {patient, vitals, reports[], deception_type, ground_truth_label, prompt}
 """
 
+import json
+import os
 import random
-import asyncio
 from typing import Literal
 
 # Reuse existing project components — no duplication
@@ -275,11 +276,22 @@ class ScenarioGenerator:
     Difficulty 3: Multi-specialist + collusion (full complexity)
     """
 
-    def __init__(self, seed: int | None = None):
+    def __init__(self, seed: int | None = None, cache_path: str | None = None):
         if seed is not None:
             random.seed(seed)
+        self._cache: list[dict] = []
+        self._cache_idx: int = 0
+        if cache_path and os.path.exists(cache_path):
+            with open(cache_path) as f:
+                self._cache = [json.loads(line) for line in f if line.strip()]
+            print(f"[ScenarioGenerator] Loaded {len(self._cache)} cached GPT-4o episodes from {cache_path}")
 
     def generate(self, difficulty: int = 1, deception_type: DeceptionType | None = None) -> dict:
+        if self._cache:
+            episode = self._cache[self._cache_idx % len(self._cache)]
+            self._cache_idx += 1
+            return episode
+
         """
         Generate one training episode.
 

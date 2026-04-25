@@ -17,6 +17,7 @@ Key LangGraph features used:
   - Append-only list fields so parallel nodes never clobber each other
 """
 
+import os
 import requests
 from langgraph.graph import StateGraph, END
 from langgraph.types import Send
@@ -248,58 +249,28 @@ def synthesize_treatment_plan(state: HospitalState) -> dict:
 def oversight_verify(state: HospitalState) -> dict:
     """
     Cross-check all specialist resource requests against the DB.
-    Flags:
-      - Ghost patient (patient_id not in DB)
-      - Resource over-claim (requested > available)
-      - Duplicate resource requests across specialists (potential collusion)
+    Calls verify_claim from oversight_core.
     """
+    from .oversight_core import verify_claim
     patient_id = state["patient_id"]
-    resource_requests = state.get("resource_requests") or []
-    fraud_flags: list[str] = []
-
-    # Ghost patient check
-    patient_rows = _query_db(f"SELECT patient_id FROM patients WHERE patient_id = '{patient_id}'")
-    if not patient_rows:
-        fraud_flags.append(f"GHOST_PATIENT: {patient_id} not in registry")
-
-    # Duplicate resource detection across specialists (collusion indicator)
-    resource_claim_count: dict[str, list[str]] = {}
-    for req in resource_requests:
-        for res in req.get("resources", []):
-            resource_claim_count.setdefault(res, []).append(req["specialist"])
-
-    for resource, claimants in resource_claim_count.items():
-        if len(claimants) > 1:
-            fraud_flags.append(
-                f"DUPLICATE_CLAIM: '{resource}' claimed by {claimants} — possible collusion"
-            )
-
-    # Severity sanity check — if all specialists report critical, cross-check vitals
     reports = state.get("specialist_reports") or []
-    critical_count = sum(1 for r in reports if r.get("severity_label") == "critical")
-    if critical_count > 3:
-        fraud_flags.append(
-            f"SEVERITY_INFLATION: {critical_count} specialists all report critical — possible coordinated inflation"
-        )
+    resource_requests = state.get("resource_requests") or []
 
-    # Decision
-    if fraud_flags:
-        decision = "REJECTED"
-        reasoning_msg = f"Oversight: REJECTED — {len(fraud_flags)} fraud flag(s): {fraud_flags}"
-    elif not reports:
-        decision = "PARTIAL"
-        reasoning_msg = "Oversight: PARTIAL — no specialist reports to verify"
-    else:
-        decision = "APPROVED"
-        reasoning_msg = (
-            f"Oversight: APPROVED — {len(reports)} specialist report(s) verified, "
-            f"no fraud detected."
-        )
+    # Ghost patient check requires patient_from_db
+    patient_rows = _query_db(f"SELECT patient_id FROM patients WHERE patient_id = '{patient_id}'")
+    patient_from_db = patient_rows[0] if patient_rows else None
+
+    verify_result = verify_claim(
+        patient_id=patient_id,
+        reports=reports,
+        resource_requests=resource_requests,
+        patient_from_db=patient_from_db,
+    )
 
     return {
-        "oversight_decision": decision,
-        "fraud_flags": fraud_flags,
-        "reasoning": [reasoning_msg],
+        "oversight_decision": verify_result["decision"],
+        "fraud_flags": verify_result["fraud_flags"],
+        "reasoning": [verify_result["reasoning"]],
         "step_count": 1,
     }
 

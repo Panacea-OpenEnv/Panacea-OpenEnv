@@ -25,6 +25,30 @@ OVERSIGHT_ENDPOINT = os.getenv("OVERSIGHT_ENDPOINT", "")
 OVERSIGHT_API_KEY = os.getenv("OVERSIGHT_API_KEY", "")
 
 
+def query_oversight_model_sync(prompt: str, timeout: float = 30.0) -> dict:
+    """
+    Synchronous version for use inside LangGraph nodes (which are plain def, not async).
+    Uses httpx synchronously when endpoint is set; falls back to deterministic rules.
+    """
+    if not OVERSIGHT_ENDPOINT:
+        return _deterministic_fallback(prompt)
+    try:
+        import httpx
+        headers = {"Authorization": f"Bearer {OVERSIGHT_API_KEY}"} if OVERSIGHT_API_KEY else {}
+        resp = httpx.post(
+            OVERSIGHT_ENDPOINT,
+            json={"prompt": prompt},
+            headers=headers,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        raw_text = resp.json().get("text", resp.json().get("generated_text", ""))
+        return _parse_response(raw_text) if raw_text else _deterministic_fallback(prompt)
+    except Exception as e:
+        print(f"[INFERENCE] Sync endpoint error ({e}), using deterministic fallback")
+        return _deterministic_fallback(prompt)
+
+
 async def query_oversight_model(prompt: str, timeout: float = 30.0) -> dict:
     """
     POST prompt to remote RL model endpoint.

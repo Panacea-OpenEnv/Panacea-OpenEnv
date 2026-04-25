@@ -1,316 +1,468 @@
 """
-Panacea GRPO Training Script — Ready for Google Colab
-=====================================================
-
-Copy-paste this into Colab cells (split at the # ── CELL markers).
-Uses Unsloth + HuggingFace TRL to train a small LLM as an oversight agent
-that detects deception in hospital resource claims.
-
-Requirements: Colab with GPU (T4 free tier works with 1.5B model)
+Panacea GRPO Training — Google Colab
+=====================================
+Paste each CELL block into a separate Colab cell and run top-to-bottom.
+Runtime: GPU (T4 free tier is sufficient for the 1.5B model).
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 1: Install Dependencies ──────────────────────────────────────────────
+# CELL 1 — Install dependencies
 # ══════════════════════════════════════════════════════════════════════════════
+# Paste and run this cell first. It takes ~3 minutes on a fresh runtime.
 
-# !pip install unsloth trl openenv-core pydantic matplotlib --quiet
-# # Clone your repo (or upload openenv_panacea/ folder)
-# !git clone https://github.com/YOUR_USERNAME/panacea.git
-# %cd panacea
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 2: Load Model with Unsloth ──────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
-from unsloth import FastLanguageModel
-import torch
-
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/Qwen2.5-1.5B-Instruct-bnb-4bit",
-    max_seq_length=2048,
-    load_in_4bit=True,
-    dtype=None,  # auto-detect
-)
-
-# Apply LoRA for efficient training
-model = FastLanguageModel.get_peft_model(
-    model,
-    r=16,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                     "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=16,
-    lora_dropout=0,
-    bias="none",
-    use_gradient_checkpointing="unsloth",
-)
-
-print(f"Model loaded: {model.config._name_or_path}")
-print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+"""
+!pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git" --quiet
+!pip install trl datasets pydantic pyngrok nest_asyncio fastapi uvicorn --quiet
+"""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 3: Generate Training Dataset ────────────────────────────────────────
+# CELL 2 — Shared utilities (no external imports)
 # ══════════════════════════════════════════════════════════════════════════════
 
-import sys
-sys.path.insert(0, ".")
-
-from openenv_panacea.scenario_generator import generate_dataset
-from openenv_panacea.reward import compute_reward
-
-# Generate 200 adversarial scenarios
-scenarios = generate_dataset(n=200, seed=42)
-
-# Format as TRL-compatible dataset
-from datasets import Dataset
-
-train_data = Dataset.from_dict({
-    "prompt": [
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": s["prompt"]}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        for s in scenarios
-    ],
-    "expected_verdict": [s["expected_verdict"] for s in scenarios],
-    "deception_type": [s["deception"]["type"] for s in scenarios],
-})
-
-print(f"Training dataset: {len(train_data)} scenarios")
-print(f"Deception distribution:")
-from collections import Counter
-dist = Counter(train_data["deception_type"])
-for dtype, count in dist.items():
-    print(f"  {dtype}: {count} ({count/len(train_data)*100:.0f}%)")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 4: Define Reward Functions ──────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
+import os
 import re
+import json
+import random
+from collections import Counter
+
+SYSTEM_PROMPT = (
+    "You are a hospital oversight AI agent. Your job is to review resource "
+    "claims from specialist doctors and detect deception: ghost patients, "
+    "cost inflation, hidden comorbidities, and collusion.\n\n"
+    "Respond with EXACTLY this format and nothing else:\n"
+    "VERDICT: APPROVED or REJECTED\n"
+    "REASONING: <your concise reasoning>"
+)
+
 
 def extract_verdict_and_reasoning(text: str) -> tuple[str, str]:
-    """Parse VERDICT and REASONING from LLM output."""
-    verdict = "REJECTED"  # Default safe
+    """Parse VERDICT and REASONING from model output."""
+    verdict = "REJECTED"  # Safe default
     reasoning = ""
-
-    # Try to find VERDICT: line
-    verdict_match = re.search(r"VERDICT:\s*(APPROVED|REJECTED)", text, re.IGNORECASE)
-    if verdict_match:
-        verdict = verdict_match.group(1).upper()
-
-    # Try to find REASONING: line
-    reasoning_match = re.search(r"REASONING:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
-    if reasoning_match:
-        reasoning = reasoning_match.group(1).strip()
-
+    m = re.search(r"VERDICT:\s*(APPROVED|REJECTED)", text, re.IGNORECASE)
+    if m:
+        verdict = m.group(1).upper()
+    m = re.search(r"REASONING:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+    if m:
+        reasoning = m.group(1).strip()
     return verdict, reasoning
 
 
-def oversight_reward_fn(completions: list[str], prompts: list[str], **kwargs) -> list[float]:
+def parse_verdict(text: str) -> str | None:
+    m = re.search(r"VERDICT:\s*(APPROVED|REJECTED)", text, re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
+def parse_reasoning(text: str) -> str:
+    m = re.search(r"REASONING:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+# ── Self-contained reward function (no src imports needed) ───────────────────
+
+def compute_reward(
+    verdict: str,
+    expected_verdict: str,
+    deception_type: str,
+    reasoning: str = "",
+) -> float:
     """
-    GRPO reward function.
-    Scores each LLM completion against the ground truth.
+    Score the oversight agent's verdict against ground truth.
+    Scoring:
+      Correct catch of deception:   +2.0
+      Correct approval of clean:    +1.0
+      False rejection (blocks legit): -2.0
+      Missed deception (approved fraud): -3.0
+      +0.5 bonus for naming the deception type in reasoning
     """
-    expected_verdicts = kwargs.get("expected_verdict", [])
-    deception_types = kwargs.get("deception_type", [])
+    if verdict not in ("APPROVED", "REJECTED"):
+        return -0.5
 
-    rewards = []
-    for i, completion in enumerate(completions):
-        verdict, reasoning = extract_verdict_and_reasoning(completion)
-        expected = expected_verdicts[i] if i < len(expected_verdicts) else "REJECTED"
-        d_type = deception_types[i] if i < len(deception_types) else "none"
+    is_deceptive = (expected_verdict == "REJECTED")
+    agent_rejected = (verdict == "REJECTED")
+    reward = 0.0
 
-        reward = compute_reward(
-            verdict=verdict,
-            expected_verdict=expected,
-            deception_type=d_type,
-            reasoning=reasoning,
-        )
-        rewards.append(reward)
+    if is_deceptive:
+        if agent_rejected:
+            reward += 2.0
+            r = reasoning.lower()
+            type_keywords = {
+                "ghost":     ["ghost", "not found", "no patient", "doesn't exist", "fabricat"],
+                "inflation":  ["inflat", "overcharg", "excessive", "too high", "above expected"],
+                "masking":    ["mask", "hidden", "omit", "missing comorbid", "concealed"],
+                "collusion":  ["collus", "same drug", "identical", "duplicate"],
+            }
+            if any(w in r for w in type_keywords.get(deception_type, [])):
+                reward += 0.5
+        else:
+            reward -= 3.0
+    else:
+        reward = 1.0 if not agent_rejected else -2.0
 
-    return rewards
-
-
-def format_reward_fn(completions: list[str], **kwargs) -> list[float]:
-    """Bonus reward for following the correct output format."""
-    rewards = []
-    for completion in completions:
-        has_verdict = bool(re.search(r"VERDICT:\s*(APPROVED|REJECTED)", completion, re.IGNORECASE))
-        has_reasoning = bool(re.search(r"REASONING:", completion, re.IGNORECASE))
-        reward = 0.0
-        if has_verdict:
-            reward += 0.5
-        if has_reasoning:
-            reward += 0.3
-        rewards.append(reward)
-    return rewards
+    return round(reward, 4)
 
 
-# Quick test
-test_completion = "VERDICT: REJECTED\nREASONING: No patient record found, this is a ghost patient."
-test_reward = oversight_reward_fn(
-    [test_completion], [""],
-    expected_verdict=["REJECTED"],
-    deception_type=["ghost"],
-)
-print(f"Test reward: {test_reward[0]} (expected ~2.45)")
+print("Cell 2 ready.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 5: Configure GRPO Training ──────────────────────────────────────────
+# CELL 3 — Load model with Unsloth
 # ══════════════════════════════════════════════════════════════════════════════
 
-from trl import GRPOTrainer, GRPOConfig
-
-training_args = GRPOConfig(
-    output_dir="./panacea_grpo_output",
-    num_train_epochs=1,
-    per_device_train_batch_size=2,
-    gradient_accumulation_steps=4,
-    learning_rate=5e-6,
-    num_generations=4,          # Generate 4 completions per prompt
-    max_completion_length=256,  # Max tokens for verdict + reasoning
-    max_prompt_length=1024,     # Max tokens for the claim prompt
-    logging_steps=5,
-    save_steps=50,
-    seed=42,
-    report_to="none",          # Disable wandb
-)
-
-trainer = GRPOTrainer(
-    model=model,
-    args=training_args,
-    tokenizer=tokenizer,
-    train_dataset=train_data,
-    reward_funcs=[oversight_reward_fn, format_reward_fn],
-)
-
-print("GRPO Trainer configured. Ready to train!")
-print(f"  Batch size: {training_args.per_device_train_batch_size}")
-print(f"  Generations per prompt: {training_args.num_generations}")
-print(f"  Learning rate: {training_args.learning_rate}")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 6: Train! ───────────────────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
-train_result = trainer.train()
-
-print(f"\nTraining complete!")
-print(f"  Total steps: {train_result.global_step}")
-print(f"  Final loss: {train_result.training_loss:.4f}")
-
-# Save the trained model
-trainer.save_model("./panacea_oversight_model")
-print("Model saved to ./panacea_oversight_model")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 7: Plot Reward Curves ───────────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
-import matplotlib.pyplot as plt
-import json
-
-# Extract training metrics
-log_history = trainer.state.log_history
-
-steps = []
-rewards = []
-losses = []
-
-for entry in log_history:
-    if "loss" in entry:
-        steps.append(entry.get("step", 0))
-        losses.append(entry["loss"])
-    if "reward" in entry or "rewards/oversight_reward_fn" in entry:
-        reward_val = entry.get("reward", entry.get("rewards/oversight_reward_fn", 0))
-        rewards.append(reward_val)
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-# Reward curve
-if rewards:
-    axes[0].plot(rewards, color="#00d4aa", linewidth=2)
-    axes[0].set_title("Oversight Agent Reward Curve", fontsize=14, fontweight="bold")
-    axes[0].set_xlabel("Training Step")
-    axes[0].set_ylabel("Average Reward")
-    axes[0].axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-    axes[0].grid(True, alpha=0.3)
-
-# Loss curve
-if losses:
-    axes[1].plot(steps[:len(losses)], losses, color="#ff6b6b", linewidth=2)
-    axes[1].set_title("Training Loss", fontsize=14, fontweight="bold")
-    axes[1].set_xlabel("Training Step")
-    axes[1].set_ylabel("Loss")
-    axes[1].grid(True, alpha=0.3)
-
-plt.suptitle("Project Panacea — GRPO Training Results", fontsize=16, fontweight="bold")
-plt.tight_layout()
-plt.savefig("reward_curve.png", dpi=150, bbox_inches="tight")
-plt.show()
-
-print("Reward curve saved to reward_curve.png")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 8: Evaluate Before vs After ─────────────────────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
-print("\n" + "=" * 60)
-print("  EVALUATION: Before vs After Training")
-print("=" * 60)
-
-# Generate test scenarios (unseen during training)
-test_scenarios = generate_dataset(n=50, seed=9999)
-
-correct = 0
-total_reward = 0.0
-results_by_type = {"ghost": [], "inflation": [], "masking": [], "none": []}
-
-for s in test_scenarios:
-    prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": s["prompt"]}],
-        tokenize=False,
-        add_generation_prompt=True,
+def load_model():
+    from unsloth import FastLanguageModel
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name="unsloth/Qwen2.5-1.5B-Instruct-bnb-4bit",
+        max_seq_length=2048,
+        load_in_4bit=True,
+        dtype=None,
     )
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                         "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=16,
+        lora_dropout=0,
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=42,
+    )
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model: {model.config._name_or_path}")
+    print(f"Trainable parameters: {trainable:,}")
+    return model, tokenizer
+
+# Run:
+# model, tokenizer = load_model()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 4 — Build training dataset
+# Option A: load pre-harvested GPT-4o JSONL (recommended)
+# Option B: generate static episodes on-the-fly (fallback, no API needed)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Minimal static episode generator (Option B fallback) ─────────────────────
+
+_DECEPTION_TYPES = ["ghost", "inflation", "masking", "collusion", "none", "none"]
+
+_DRUG_POOL = [
+    "Aspirin 81mg", "Metformin 500mg", "Lisinopril 10mg", "Amoxicillin 500mg",
+    "Atorvastatin 20mg", "Omeprazole 20mg", "Clopidogrel 75mg",
+    "Enoxaparin 40mg", "Ceftriaxone 1g", "Metoprolol 50mg",
+]
+_SPECIALTIES = [
+    "Cardiology", "Neurology", "Pulmonology", "Oncology",
+    "Orthopedics", "General Medicine", "Nephrology",
+]
+_BASE_COSTS = {
+    "Cardiology": 25000, "Neurology": 30000, "Pulmonology": 20000,
+    "Oncology": 50000, "Orthopedics": 18000, "General Medicine": 8000,
+    "Nephrology": 22000,
+}
+
+
+def _make_report(spec: str, severity: str = None) -> dict:
+    sev = severity or random.choice(["low", "medium", "high", "critical"])
+    drug = random.choice(_DRUG_POOL)
+    return {
+        "specialty": spec,
+        "severity": sev,
+        "medications": [{"name": drug, "dose": "standard", "frequency": "daily", "duration": "7 days"}],
+        "recommended_tests": random.sample(["CBC", "ECG", "MRI", "CT", "X-Ray"], k=2),
+        "summary": f"Patient assessed by {spec} specialist. Severity: {sev}. Treatment initiated.",
+    }
+
+
+def _build_prompt(patient_id: str, reports: list[dict], claimed_amount: float) -> str:
+    specs = [r["specialty"] for r in reports]
+    reports_text = ""
+    for i, r in enumerate(reports, 1):
+        meds = ", ".join(m["name"] for m in r.get("medications", []))
+        reports_text += (
+            f"\nSPECIALIST REPORT #{i} — {r['specialty']}:\n"
+            f"  Severity: {r['severity']}\n"
+            f"  Medications: {meds}\n"
+            f"  Assessment: {r.get('summary', '')[:150]}"
+        )
+    return (
+        f"You are a hospital oversight AI agent. Analyze this claim for deception.\n"
+        f"\nRESOURCE CLAIM:\n"
+        f"  Patient ID: {patient_id}\n"
+        f"  Specialists: {specs}\n"
+        f"  Claimed Amount: ${claimed_amount:,.2f}"
+        f"{reports_text}\n"
+        f"\nRespond with:\n"
+        f"VERDICT: APPROVED or REJECTED\n"
+        f"REASONING: <your detailed reasoning>"
+    )
+
+
+def _generate_episode(deception: str) -> dict:
+    spec = random.choice(_SPECIALTIES)
+    base = _BASE_COSTS[spec]
+    pid = f"P{random.randint(1000, 9999)}"
+
+    if deception == "ghost":
+        pid = f"P{random.randint(9000, 9999)}"  # Non-existent patient
+        report = _make_report(spec, severity="critical")
+        claimed = round(random.uniform(30000, 80000), 2)
+        reports = [report]
+        label = "REJECTED"
+
+    elif deception == "inflation":
+        report = _make_report(spec)
+        severity_idx = 0.4
+        claimed = round(base * severity_idx * random.uniform(2.5, 4.0), 2)
+        report["severity"] = "critical"
+        reports = [report]
+        label = "REJECTED"
+
+    elif deception == "masking":
+        report = _make_report(spec)
+        # Summary omits the critical comorbidity
+        report["summary"] = f"Patient assessed by {spec}. No significant comorbidities noted."
+        claimed = round(base * 0.5 * random.uniform(0.9, 1.1), 2)
+        reports = [report]
+        label = "REJECTED"
+
+    elif deception == "collusion":
+        shared_drug = "Enoxaparin 40mg"
+        spec2 = random.choice([s for s in _SPECIALTIES if s != spec])
+        r1 = _make_report(spec)
+        r2 = _make_report(spec2)
+        # Inject same drug into both reports
+        r1["medications"].append({"name": shared_drug, "dose": "40mg", "frequency": "daily", "duration": "7 days"})
+        r2["medications"].append({"name": shared_drug, "dose": "40mg", "frequency": "daily", "duration": "7 days"})
+        claimed = round((base + _BASE_COSTS[spec2]) * 0.6 * random.uniform(1.0, 1.3), 2)
+        reports = [r1, r2]
+        label = "REJECTED"
+
+    else:  # none — clean claim
+        report = _make_report(spec)
+        severity_idx = random.uniform(0.2, 0.8)
+        claimed = round(base * severity_idx * random.uniform(0.9, 1.1), 2)
+        reports = [report]
+        label = "APPROVED"
+
+    return {
+        "prompt": _build_prompt(pid, reports, claimed),
+        "ground_truth_label": label,
+        "deception_type": deception,
+    }
+
+
+def build_dataset_from_jsonl(jsonl_path: str):
+    """Load pre-harvested GPT-4o episodes from JSONL (Option A)."""
+    from datasets import Dataset, DatasetDict
+    episodes = []
+    with open(jsonl_path) as f:
+        for line in f:
+            ep = json.loads(line.strip())
+            if "prompt" in ep and "ground_truth_label" in ep:
+                episodes.append(ep)
+
+    random.shuffle(episodes)
+    split = int(len(episodes) * 0.9)
+    train_eps, test_eps = episodes[:split], episodes[split:]
+
+    def to_dataset(eps):
+        return Dataset.from_dict({
+            "prompt": [e["prompt"] for e in eps],
+            "expected_verdict": [e["ground_truth_label"] for e in eps],
+            "deception_type": [e["deception_type"] for e in eps],
+        })
+
+    ds = DatasetDict({"train": to_dataset(train_eps), "test": to_dataset(test_eps)})
+    print(f"Loaded from JSONL: {len(ds['train'])} train / {len(ds['test'])} test")
+    _print_distribution(ds["train"])
+    return ds
+
+
+def build_dataset_static(n: int = 2000, seed: int = 42):
+    """Generate static episodes on-the-fly (Option B — no API needed)."""
+    from datasets import Dataset, DatasetDict
+    random.seed(seed)
+
+    episodes = []
+    weights = {"ghost": 0.2, "inflation": 0.2, "masking": 0.2, "collusion": 0.2, "none": 0.2}
+    for _ in range(n):
+        deception = random.choices(list(weights.keys()), weights=list(weights.values()))[0]
+        episodes.append(_generate_episode(deception))
+
+    random.shuffle(episodes)
+    split = int(n * 0.9)
+    train_eps, test_eps = episodes[:split], episodes[split:]
+
+    def to_dataset(eps):
+        return Dataset.from_dict({
+            "prompt": [e["prompt"] for e in eps],
+            "expected_verdict": [e["ground_truth_label"] for e in eps],
+            "deception_type": [e["deception_type"] for e in eps],
+        })
+
+    ds = DatasetDict({"train": to_dataset(train_eps), "test": to_dataset(test_eps)})
+    print(f"Static dataset: {len(ds['train'])} train / {len(ds['test'])} test")
+    _print_distribution(ds["train"])
+    return ds
+
+
+def _print_distribution(split):
+    dist = Counter(split["deception_type"])
+    total = len(split)
+    print("Deception distribution:")
+    for dtype, count in sorted(dist.items()):
+        print(f"  {dtype:12s}: {count:4d}  ({count/total*100:.0f}%)")
+
+
+# Run ONE of these:
+# dataset = build_dataset_from_jsonl("data/gpt4o_reports.jsonl")  # Recommended
+# dataset = build_dataset_static(n=2000)                          # Fallback
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 5 — Reward functions
+# ══════════════════════════════════════════════════════════════════════════════
+
+def make_reward_fns():
+    """Return the two GRPO reward functions. All logic is self-contained."""
+
+    def oversight_reward_fn(completions, prompts=None, **kwargs):
+        expected_verdicts = kwargs.get("expected_verdict", [])
+        deception_types   = kwargs.get("deception_type", [])
+        rewards = []
+        for i, completion in enumerate(completions):
+            verdict, reasoning = extract_verdict_and_reasoning(completion)
+            expected  = expected_verdicts[i] if i < len(expected_verdicts) else "REJECTED"
+            dec_type  = deception_types[i]   if i < len(deception_types)   else "none"
+            rewards.append(compute_reward(verdict, expected, dec_type, reasoning))
+        return rewards
+
+    def format_reward_fn(completions, **kwargs):
+        rewards = []
+        for c in completions:
+            has_verdict   = bool(re.search(r"VERDICT:\s*(APPROVED|REJECTED)", c, re.IGNORECASE))
+            has_reasoning = bool(re.search(r"REASONING:", c, re.IGNORECASE))
+            rewards.append((0.5 if has_verdict else 0.0) + (0.3 if has_reasoning else 0.0))
+        return rewards
+
+    # Quick smoke test
+    test_out  = "VERDICT: REJECTED\nREASONING: Patient P9999 not found in the registry — ghost patient."
+    test_r    = oversight_reward_fn([test_out], expected_verdict=["REJECTED"], deception_type=["ghost"])
+    test_fmt  = format_reward_fn([test_out])
+    print(f"Reward self-test : {test_r[0]:.2f}  (expected 2.5)")
+    print(f"Format self-test : {test_fmt[0]:.2f} (expected 0.8)")
+
+    return oversight_reward_fn, format_reward_fn
+
+# Run:
+# oversight_reward_fn, format_reward_fn = make_reward_fns()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 6 — GRPO Training
+# ══════════════════════════════════════════════════════════════════════════════
+
+def train(model, tokenizer, dataset):
+    from trl import GRPOTrainer, GRPOConfig
+
+    oversight_reward_fn, format_reward_fn = make_reward_fns()
+
+    args = GRPOConfig(
+        output_dir             = "./panacea_grpo_out",
+        num_train_epochs       = 1,
+        per_device_train_batch_size = 2,
+        gradient_accumulation_steps = 4,
+        learning_rate          = 5e-6,
+        num_generations        = 4,
+        max_completion_length  = 256,
+        max_prompt_length      = 1024,
+        logging_steps          = 5,
+        save_steps             = 100,
+        seed                   = 42,
+        report_to              = "none",
+        remove_unused_columns  = False,  # Required: dataset has extra columns
+    )
+
+    trainer = GRPOTrainer(
+        model           = model,
+        processing_class = tokenizer,      # trl>=0.9 uses processing_class not tokenizer
+        args            = args,
+        train_dataset   = dataset["train"],
+        reward_funcs    = [oversight_reward_fn, format_reward_fn],
+    )
+
+    print("Starting GRPO training...")
+    print(f"  Train samples : {len(dataset['train'])}")
+    print(f"  Batch size    : {args.per_device_train_batch_size} x {args.gradient_accumulation_steps} accum")
+    print(f"  Generations   : {args.num_generations} per prompt")
+
+    result = trainer.train()
+    print(f"\nDone! Steps: {result.global_step} | Loss: {result.training_loss:.4f}")
+
+    trainer.save_model("./panacea_oversight_model")
+    tokenizer.save_pretrained("./panacea_oversight_model")
+    print("Saved to ./panacea_oversight_model")
+    return trainer
+
+# Run:
+# trainer = train(model, tokenizer, dataset)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 7 — Inference helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_inference(model, tokenizer, prompt: str) -> str:
+    """Run the trained model on a single prompt string."""
+    import torch
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens = 512,
-            temperature    = 0.1,
-            top_p          = 0.9,
-            do_sample      = True,
-            pad_token_id   = tokenizer.eos_token_id,
+            max_new_tokens    = 256,
+            temperature       = 0.1,
+            top_p             = 0.9,
+            do_sample         = True,
+            pad_token_id      = tokenizer.eos_token_id,
         )
-    new_tokens = out[0][inputs["input_ids"].shape[1]:]
+
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
     return tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 
-def evaluate(model, tokenizer, dataset):
-    from unsloth import FastLanguageModel as FLM
-    FLM.for_inference(model)
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 8 — Evaluate
+# ══════════════════════════════════════════════════════════════════════════════
 
-    samples = dataset["test"].select(range(min(50, len(dataset["test"]))))
-    results = {"tp": 0, "tn": 0, "fp": 0, "fn": 0, "parse_errors": 0}
-    type_breakdown = Counter()
+def evaluate(model, tokenizer, dataset, n_samples: int = 50):
+    test_split = dataset["test"]
+    n = min(n_samples, len(test_split))
+    samples = test_split.select(range(n))
 
-    for sample in samples:
-        response  = run_inference(model, tokenizer, sample["prompt"])
-        verdict   = parse_verdict(response)
-        actual    = sample["expected_verdict"]
-        dec_type  = sample["deception_type"]
+    results      = {"tp": 0, "tn": 0, "fp": 0, "fn": 0, "parse_err": 0}
+    fn_breakdown = Counter()
+
+    for i in range(n):
+        s        = samples[i]
+        response = run_inference(model, tokenizer, s["prompt"])
+        verdict  = parse_verdict(response)
+        actual   = s["expected_verdict"]
+        dtype    = s["deception_type"]
 
         if verdict is None:
-            results["parse_errors"] += 1
+            results["parse_err"] += 1
             continue
 
         if   actual == "REJECTED" and verdict == "REJECTED": results["tp"] += 1
@@ -318,159 +470,112 @@ def evaluate(model, tokenizer, dataset):
         elif actual == "APPROVED" and verdict == "REJECTED": results["fp"] += 1
         elif actual == "REJECTED" and verdict == "APPROVED":
             results["fn"] += 1
-            type_breakdown[dec_type] += 1  # which fraud types are being missed?
+            fn_breakdown[dtype] += 1
 
-    total     = sum(results.values())
-    correct   = results["tp"] + results["tn"]
-    precision = results["tp"] / max(results["tp"] + results["fp"], 1)
-    recall    = results["tp"] / max(results["tp"] + results["fn"], 1)
-    f1        = 2 * precision * recall / max(precision + recall, 1e-9)
+    total   = sum(results.values())
+    correct = results["tp"] + results["tn"]
+    prec    = results["tp"] / max(results["tp"] + results["fp"], 1)
+    rec     = results["tp"] / max(results["tp"] + results["fn"], 1)
+    f1      = 2 * prec * rec / max(prec + rec, 1e-9)
 
     print(f"\n{'='*45}")
-    print(f" Eval Results  (n={total})")
+    print(f"  Eval Results  (n={total})")
     print(f"{'='*45}")
-    print(f" Accuracy  : {correct/total*100:.1f}%")
-    print(f" Precision : {precision*100:.1f}%")
-    print(f" Recall    : {recall*100:.1f}%")
-    print(f" F1 Score  : {f1*100:.1f}%")
-    print(f" False Negatives (missed fraud): {results['fn']}  <- must be 0")
-    print(f" Missed by type : {dict(type_breakdown)}")
-    print(f" Parse errors   : {results['parse_errors']}")
+    print(f"  Accuracy   : {correct/total*100:.1f}%")
+    print(f"  Precision  : {prec*100:.1f}%")
+    print(f"  Recall     : {rec*100:.1f}%")
+    print(f"  F1         : {f1*100:.1f}%")
+    print(f"  Missed fraud: {results['fn']}  <- target: 0")
+    print(f"  By type    : {dict(fn_breakdown)}")
+    print(f"  Parse errs : {results['parse_err']}")
     print(f"{'='*45}\n")
+    return results
+
+# Run:
+# results = evaluate(model, tokenizer, dataset)
 
 
-# ── Section 7 — Export ────────────────────────────────────────────────────────
-def export_model(model, tokenizer, hf_repo: str = ""):
-    import subprocess
+# ══════════════════════════════════════════════════════════════════════════════
+# CELL 9 — Export & serve with ngrok
+# ══════════════════════════════════════════════════════════════════════════════
 
-    # Always save to /content/ so it's visible in Colab file browser
+def export_and_serve(model, tokenizer, ngrok_token: str = "", hf_repo: str = ""):
+    """
+    Export the model and start a FastAPI server accessible via ngrok.
+    Copy the PUBLIC URL and paste it into your .env as OVERSIGHT_ENDPOINT=<url>/generate
+    """
+    import subprocess, threading
+    import nest_asyncio, uvicorn
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel
+
+    # ── Save ──────────────────────────────────────────────────────────────────
     SAVE_DIR = "/content/panacea_oversight_model"
-    ZIP_PATH = "/content/panacea_oversight_model.zip"
-
     model.save_pretrained(SAVE_DIR, safe_serialization=True)
     tokenizer.save_pretrained(SAVE_DIR)
-    print(f"Model saved to: {SAVE_DIR}")
 
-    # List what was saved
-    result = subprocess.run(["ls", "-lh", SAVE_DIR], capture_output=True, text=True)
-    print(result.stdout)
-
-    subprocess.run(["zip", "-r", ZIP_PATH, SAVE_DIR], check=True)
-    print(f"Zipped to: {ZIP_PATH}")
-
-    # Verify zip exists and show size
-    size = subprocess.run(["du", "-sh", ZIP_PATH], capture_output=True, text=True)
-    print(f"Zip size: {size.stdout.strip()}")
-    print("\nDownload: Colab left sidebar → folder icon → right-click panacea_oversight_model.zip → Download")
+    result = subprocess.run(["du", "-sh", SAVE_DIR], capture_output=True, text=True)
+    print(f"Model saved: {result.stdout.strip()}")
 
     if hf_repo:
         model.push_to_hub(hf_repo)
         tokenizer.push_to_hub(hf_repo)
-        print(f"Pushed to: https://huggingface.co/{hf_repo}")
+        print(f"Pushed to HuggingFace: https://huggingface.co/{hf_repo}")
 
-
-# ── Section 8 — FastAPI server + ngrok (hackathon demo) ───────────────────────
-def serve(model, tokenizer, ngrok_token: str = ""):
-    import nest_asyncio, uvicorn
-    from fastapi import FastAPI, HTTPException
-    from pydantic import BaseModel as PBase
-
+    # ── FastAPI ───────────────────────────────────────────────────────────────
     nest_asyncio.apply()
-
-    from unsloth import FastLanguageModel as FLM
-    FLM.for_inference(model)
-
     app = FastAPI(title="Panacea Oversight Agent", version="1.0")
 
-    class ClaimRequest(PBase):
-        claim_text: str          # same field name as PanaceaEnv observation
+    class Req(BaseModel):
+        prompt: str
         temperature: float = 0.1
-
-    class OversightResponse(PBase):
-        verdict: str             # APPROVED or REJECTED
-        reasoning: str
-        raw_output: str
 
     @app.get("/health")
     def health():
         return {"status": "ok", "model": "panacea-oversight-v1"}
 
-    @app.post("/analyze", response_model=OversightResponse)
-    def analyze(req: ClaimRequest):
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": req.claim_text},
-        ]
-        raw     = run_inference(model, tokenizer, messages)
+    @app.post("/generate")
+    def generate(req: Req):
+        """Primary endpoint — compatible with inference_server.py expectations."""
+        raw = run_inference(model, tokenizer, req.prompt)
+        return {"text": raw}
+
+    @app.post("/analyze")
+    def analyze(req: Req):
+        """Structured endpoint for direct use."""
+        raw     = run_inference(model, tokenizer, req.prompt)
         verdict = parse_verdict(raw)
         if verdict is None:
-            raise HTTPException(status_code=422,
-                                detail=f"Model did not return a valid VERDICT. Output: {raw[:300]}")
-        return OversightResponse(
-            verdict    = verdict,
-            reasoning  = parse_reasoning(raw),
-            raw_output = raw,
-        )
+            raise HTTPException(422, detail=f"Model returned unparseable output: {raw[:200]}")
+        return {
+            "verdict":    verdict,
+            "reasoning":  parse_reasoning(raw),
+            "raw_output": raw,
+        }
 
-    # ngrok public tunnel
+    # ── ngrok tunnel ──────────────────────────────────────────────────────────
     if ngrok_token:
         from pyngrok import ngrok, conf
         conf.get_default().auth_token = ngrok_token
         public_url = ngrok.connect(8000).public_url
-        print(f"\n{'='*50}")
-        print(f"PUBLIC URL : {public_url}")
-        print(f"Swagger UI : {public_url}/docs")
-        print(f"Analyze    : POST {public_url}/analyze")
-        print(f"{'='*50}\n")
+        print(f"\n{'='*55}")
+        print(f"  PUBLIC URL : {public_url}")
+        print(f"  Swagger    : {public_url}/docs")
+        print(f"  /generate  : POST {public_url}/generate")
+        print(f"\n  Add to .env:")
+        print(f"  OVERSIGHT_ENDPOINT={public_url}/generate")
+        print(f"{'='*55}\n")
     else:
-        print("Local server: http://localhost:8000  (Swagger: /docs)")
+        print("Running locally: http://localhost:8000  (no ngrok token provided)")
 
+    # Run server in background thread (daemon=True so Colab cell returns)
     def _run():
         uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    print("Server started.")
-    t.join()   # blocks when run as a script; Ctrl-C to stop
+    print("Server is running. Send requests to the PUBLIC URL above.")
+    # NOTE: do NOT call t.join() — that would block the cell forever.
 
-
-# ── Quick demo: show a sample prompt/response before training ─────────────────
-def demo_sample(dataset):
-    sample = dataset["train"][0]
-    print("\n--- Sample training prompt ---")
-    for msg in sample["prompt"]:
-        print(f"[{msg['role'].upper()}]\n{msg['content']}\n")
-    print(f"Expected verdict : {sample['expected_verdict']}")
-    print(f"Deception type   : {sample['deception_type']}")
-    print("------------------------------\n")
-
-
-# ── Entry Point ───────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    SKIP_TRAIN  = os.getenv("SKIP_TRAIN",       "0") == "1"
-    DO_SERVE    = os.getenv("SERVE",            "0") == "1"
-    HF_REPO     = os.getenv("HF_REPO",           "")
-    NGROK_TOKEN = os.getenv("NGROK_AUTH_TOKEN",  "")
-    N_EPISODES  = int(os.getenv("N_EPISODES",  "2000"))
-
-    # Build dataset from Panacea sub-agent generators
-    dataset = build_hf_dataset()
-    demo_sample(dataset)
-
-    if not SKIP_TRAIN:
-        model, tokenizer = load_model()
-        train(model, tokenizer, dataset)
-        export_model(model, tokenizer, hf_repo=HF_REPO)
-    else:
-        # Load an already-saved checkpoint
-        from unsloth import FastLanguageModel
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name     = "panacea_oversight_model",
-            max_seq_length = 2048,
-            load_in_4bit   = True,
-        )
-
-    evaluate(model, tokenizer, dataset)
-
-    if DO_SERVE:
-        serve(model, tokenizer, ngrok_token=NGROK_TOKEN)
+# Run:
+# export_and_serve(model, tokenizer, ngrok_token="YOUR_NGROK_TOKEN_HERE")

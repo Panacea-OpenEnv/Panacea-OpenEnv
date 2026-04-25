@@ -32,6 +32,7 @@ from ..agents.specialist_gpt import run_specialist_consultation, inject_patient_
 from ..agents.consult_bridge import detect_consult_request, run_consult
 from ..agents.agent_council import detect_primary_specialist, run_council
 from ..database.mongo_client import get_patient, save_consultation, save_medical_summary
+from ..environment.reward import compute_reward
 from ..utils.terminal_display import display
 
 load_dotenv()
@@ -381,7 +382,8 @@ async def run_voice_session(
         stt.load()
     tts.start()
 
-    patient = await get_patient(patient_id) or {
+    patient_from_db = await get_patient(patient_id)
+    patient = patient_from_db or {
         "patient_id": patient_id,
         "name": "Patient",
     }
@@ -584,20 +586,28 @@ async def run_voice_session(
     except Exception as exc:
         display.error("MONGO", f"Failed to save summary: {exc}")
 
-    # ── Oversight fraud check ──────────────────────────────────────────────────
-    fraud_flags: list[str] = list(conflicts)
-    med_counts: dict[str, list[str]] = {}
-    for r in reports:
-        for m in r.get("medications", []):
-            n = m.get("name", "")
-            if n:
-                med_counts.setdefault(n, []).append(r.get("specialty", ""))
-    for med, claimants in med_counts.items():
-        if len(claimants) > 1 and med not in [f.split()[0] for f in fraud_flags]:
-            fraud_flags.append(f"DUPLICATE_PRESCRIPTION: {med} by {claimants}")
+    # ── Oversight verification (MongoDB-aware, no backend dependency) ────────────
+    from ..agents.oversight_core import verify_claim
 
-    oversight_status = "REJECTED" if fraud_flags else "APPROVED"
-    reward = -2.0 * len(fraud_flags) + (1.0 if not fraud_flags else 0.0)
+    verify_result = verify_claim(
+        patient_id=patient_id,
+        reports=reports,
+        resource_requests=[],
+        patient_from_db=patient_from_db,
+        drug_conflicts=conflicts,
+    )
+
+    fraud_flags = verify_result["fraud_flags"]
+    oversight_status = verify_result["decision"]
+    reasoning = verify_result["reasoning"]
+
+    reward = compute_reward(
+        verdict=oversight_status,
+        expected_verdict="APPROVED",
+        deception_type="none",
+        reasoning=reasoning,
+    )
+
     display.oversight_check(oversight_status, fraud_flags)
     display.decision(oversight_status, reward)
 

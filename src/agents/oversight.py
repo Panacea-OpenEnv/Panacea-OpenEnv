@@ -55,14 +55,23 @@ class OversightAgent:
         # 1. Data Gathering from MongoDB (always — provides context for both paths)
         db_data = await self._fetch_db_data(patient_id)
 
-        # 2. Decision Logic — RL model or deterministic
-        if self._use_rl_model:
-            result = await self._rl_model_decision(claim_event, db_data)
-        else:
-            result = self._deterministic_decision(claim_event, db_data)
+        # 2. Decision Logic
+        from .oversight_core import verify_claim
+        claimed = claim_event.claimed_state
+        
+        verify_result = verify_claim(
+            patient_id=patient_id,
+            reports=[], # No parsed reports in event bus yet
+            resource_requests=[{"resources": [claimed.get("requested_resource")], "specialist": claimed.get("department")}] if claimed.get("requested_resource") else [],
+            patient_from_db=db_data.get("vitals") or db_data.get("comorbidities"),
+            db_comorbidities=db_data.get("comorbidities", []),
+            claimed_comorbidities=claimed.get("comorbidities", []),
+            true_state=str(claim_event.true_patient_state),
+            claimed_state_str=str(claimed),
+        )
 
-        verdict = result["decision"]
-        reasoning = result["reasoning"]
+        verdict = verify_result["decision"]
+        reasoning = verify_result["reasoning"]
 
         print(f"[{self.agent_id}] Finished review. Verdict: {verdict}")
 
@@ -98,109 +107,4 @@ class OversightAgent:
         except Exception as e:
             return {"error": f"Error fetching from MongoDB: {e}"}
 
-    # ── RL Model path ─────────────────────────────────────────────────────────
 
-    async def _rl_model_decision(self, claim_event: ActionProposedEvent, db_data: dict) -> dict:
-        """Use trained RL model for intelligent LLM reasoning."""
-        prompt = self._format_observation(claim_event, db_data)
-        result = await query_oversight_model(prompt)
-        return result
-
-    # ── Deterministic fallback ────────────────────────────────────────────────
-
-    def _deterministic_decision(self, claim_event: ActionProposedEvent, db_data: dict) -> dict:
-        """Original rule-based logic — preserved as fallback."""
-        verdict = "APPROVED"
-        reasoning = "Verified cleanly."
-        fraud_flags = []
-
-        if "error" in db_data:
-            return {
-                "decision": "REJECTED",
-                "fraud_flags": ["db_error"],
-                "reasoning": "Suspicious backend state tracking timeout.",
-            }
-
-        db_result_str = json.dumps(db_data, indent=2)
-
-        # Check for critical comorbidities that were hidden
-        comorbidities = db_data.get("comorbidities", [])
-        claimed_comorbidities = claim_event.claimed_state.get("comorbidities", [])
-        critical_found = [
-            c for c in comorbidities
-            if c.get("is_critical") and c.get("condition") not in str(claimed_comorbidities)
-        ]
-
-        if critical_found:
-            verdict = "REJECTED"
-            fraud_flags.append("masking")
-            conditions = [c.get("condition", "unknown") for c in critical_found]
-            reasoning = f"Caught omission of critical conditions: {conditions}."
-
-        # Check for ghost patient (no records at all)
-        elif not comorbidities and not db_data.get("vitals"):
-            # Could be ghost or just sparse records — check if patient exists
-            true_state = claim_event.true_patient_state
-            if "CRITICAL" in str(true_state) and "CRITICAL" not in str(claim_event.claimed_state):
-                verdict = "REJECTED"
-                fraud_flags.append("masking")
-                reasoning = "Critical state mismatch detected between true and claimed state."
-
-        return {
-            "decision": verdict,
-            "fraud_flags": fraud_flags,
-            "reasoning": reasoning,
-        }
-
-    # ── Observation formatter ─────────────────────────────────────────────────
-
-    def _format_observation(self, claim_event: ActionProposedEvent, db_data: dict) -> str:
-        """Format the claim + DB context as a prompt for the RL model."""
-        claimed = claim_event.claimed_state
-        patient_id = claimed.get("patient_id", "UNKNOWN")
-
-        # Patient section from DB
-        vitals = db_data.get("vitals", {})
-        comorbidities = db_data.get("comorbidities", [])
-
-        if "error" in db_data:
-            patient_section = f"\nPATIENT RECORD:\n  ID: {patient_id}\n  *** DATABASE ERROR ***"
-        elif not vitals and not comorbidities:
-            patient_section = (
-                f"\nPATIENT RECORD:\n  ID: {patient_id}\n"
-                f"  *** NO PATIENT RECORD FOUND IN HOSPITAL REGISTRY ***"
-            )
-        else:
-            v = vitals or {}
-            vitals_str = (
-                f"HR={v.get('heart_rate', '?')}, BP={v.get('bp_systolic', '?')}/{v.get('bp_diastolic', '?')}, "
-                f"O2={v.get('o2_saturation', '?')}%"
-            )
-            comorbid_str = ", ".join(
-                c.get("condition", "") for c in comorbidities
-            ) or "None on record"
-            patient_section = (
-                f"\nPATIENT RECORD:\n  ID: {patient_id}\n"
-                f"  Vitals: {vitals_str}\n"
-                f"  Known Conditions: {comorbid_str}"
-            )
-
-        # Claim section
-        dept = claimed.get("department", claim_event.agent_id)
-        protocol = claimed.get("protocol", "Unknown")
-        resource = claimed.get("requested_resource", "Unknown")
-        amount = claimed.get("claimed_amount", 0)
-
-        return (
-            f"You are a hospital oversight AI agent. Analyze this claim for deception.\n"
-            f"\nRESOURCE CLAIM:\n"
-            f"  Department: {dept}\n"
-            f"  Protocol: {protocol}\n"
-            f"  Resource: {resource}\n"
-            f"  Claimed Amount: ${amount:,.2f}\n"
-            f"  Reported Comorbidities: {claimed.get('comorbidities', [])}"
-            f"{patient_section}\n"
-            f"\nRespond with:\n"
-            f"VERDICT: APPROVED or REJECTED\n"
-            f"REASONING: <your detailed reasoning>"
-        )

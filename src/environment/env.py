@@ -18,6 +18,7 @@ from gymnasium import spaces
 import numpy as np
 
 from ..training.scenario_generator import ScenarioGenerator
+from ..environment.reward import compute_reward
 
 
 class PanaceaEnv(gym.Env):
@@ -30,17 +31,6 @@ class PanaceaEnv(gym.Env):
 
     metadata = {"render_modes": ["human"]}
     MAX_EPISODE_STEPS = 6
-
-    # ── Zero-sum reward table (from arena.py:_score_match) ────────────────────
-    REWARD_TABLE = {
-        # (action, ground_truth_is_fraud) → reward
-        ("REJECTED", True):   +2.0,   # Correct catch
-        ("APPROVED", True):   -3.0,   # Missed fraud (worst case)
-        ("APPROVED", False):  +1.0,   # Correct approval
-        ("REJECTED", False):  -2.0,   # False rejection (bad for patient care)
-        ("PARTIAL",  True):   -0.5,   # Hedge on fraud — weak
-        ("PARTIAL",  False):  -0.5,   # Hedge on clean — weak
-    }
 
     ACTION_MAP = {0: "APPROVED", 1: "PARTIAL", 2: "REJECTED"}
 
@@ -107,13 +97,13 @@ class PanaceaEnv(gym.Env):
             return obs, reward, True, True, {"status": "timeout_exhaustion"}
 
         action_str = self.ACTION_MAP.get(action, "REJECTED")
-        is_fraud = self._scenario["ground_truth_label"] == "REJECTED"
 
-        # Core reward from zero-sum table
-        reward = self.REWARD_TABLE.get((action_str, is_fraud), 0.0)
-
-        # Step penalty (from nodes.py:263)
-        reward -= self.step_count * 0.05
+        reward = compute_reward(
+            verdict=action_str,
+            expected_verdict=self._scenario["ground_truth_label"],
+            deception_type=self._scenario["deception_type"],
+            step_count=self.step_count,
+        )
 
         # Trust penalty: update ledger based on decision correctness
         dept = self._scenario.get("department", "Unknown")

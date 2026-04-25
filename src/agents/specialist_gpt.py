@@ -141,6 +141,7 @@ async def run_specialist_consultation(
     on_token=None,
     on_turn_complete=None,
     voice_mode: bool = False,
+    patient_override: dict | None = None,
 ) -> dict:
     """
     Full multi-turn specialist consultation.
@@ -152,15 +153,22 @@ async def run_specialist_consultation(
         initial_complaint: patient's first spoken complaint (from voice STT)
         on_token:          callback(token_str) for streaming TTS
         on_turn_complete:  callback(turn_dict) for terminal display
+        patient_override:  dict containing 'patient', 'vitals', 'comorbids', 'history' to skip DB
 
     Returns:
         dict with full conversation, diagnosis, medications
     """
-    # ── Load patient context from MongoDB ────────────────────────────────────
-    patient      = await get_patient(patient_id) or {}
-    vitals       = await get_patient_vitals(patient_id)
-    comorbids    = await get_patient_comorbidities(patient_id)
-    history      = await get_patient_history(patient_id, limit=3)
+    # ── Load patient context from MongoDB or override ────────────────────────
+    if patient_override:
+        patient   = patient_override.get("patient", {})
+        vitals    = patient_override.get("vitals", {})
+        comorbids = patient_override.get("comorbids", [])
+        history   = patient_override.get("history", [])
+    else:
+        patient      = await get_patient(patient_id) or {}
+        vitals       = await get_patient_vitals(patient_id)
+        comorbids    = await get_patient_comorbidities(patient_id)
+        history      = await get_patient_history(patient_id, limit=3)
 
     system_prompt = build_system_prompt(spec_name, patient, vitals, comorbids, history)
 
