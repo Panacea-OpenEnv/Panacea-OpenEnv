@@ -134,7 +134,7 @@ def display_episode(episode_num: int, scenario: dict, result: dict, mode: str) -
     is_correct = (decision == ground_truth)
 
     verdict_color = "green" if decision == "APPROVED" else "red"
-    correct_str = "[green]✓ CORRECT[/]" if is_correct else "[red]✗ WRONG[/]"
+    correct_str = "[green]CORRECT[/]" if is_correct else "[red]WRONG[/]"
 
     console.print(
         f"\n  [{color}]Deception: {deception.upper()}[/]   "
@@ -237,9 +237,9 @@ async def main():
     correct_count = 0
     for r in results:
         color = DECEPTION_COLORS.get(r["deception"], "white")
-        correct_str = "[green]✓[/]" if r["correct"] else "[red]✗[/]"
+        correct_str = "[green]Y[/]" if r["correct"] else "[red]N[/]"
         verdict_color = "green" if r["verdict"] == "APPROVED" else "red"
-        flags = ", ".join(r.get("fraud_flags", [])) or "—"
+        flags = ", ".join(r.get("fraud_flags", [])) or "-"
         table.add_row(
             str(r["episode"]),
             diff_name,
