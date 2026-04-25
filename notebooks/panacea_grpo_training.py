@@ -319,7 +319,7 @@ def _print_distribution(split):
 
 # Run ONE of these:
 # dataset = build_dataset_from_jsonl("data/gpt4o_reports.jsonl")  # Recommended
-dataset = build_dataset_static(n=150)                          # HACKATHON SPEED: 150 episodes
+dataset = build_dataset_static(n=1000)                          # HACKATHON SPEED: 150 episodes
 
 
 # ══════════════════════════════════════════════════════════════════════════════
