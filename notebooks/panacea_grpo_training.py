@@ -518,20 +518,27 @@ def evaluate(model, tokenizer, dataset):
 
 # ── Section 7 — Export ────────────────────────────────────────────────────────
 def export_model(model, tokenizer, hf_repo: str = ""):
-    SAVE_DIR = "panacea_oversight_model"
-    model.save_pretrained(SAVE_DIR)
-    tokenizer.save_pretrained(SAVE_DIR)
-    print(f"Model saved locally: {SAVE_DIR}/")
-
     import subprocess
-    subprocess.run(["zip", "-r", "panacea_oversight_model.zip", SAVE_DIR], check=True)
-    print("Zipped: panacea_oversight_model.zip")
 
-    try:
-        from google.colab import files
-        files.download("panacea_oversight_model.zip")
-    except ImportError:
-        print("Not in Colab — download the zip manually from the file browser.")
+    # Always save to /content/ so it's visible in Colab file browser
+    SAVE_DIR = "/content/panacea_oversight_model"
+    ZIP_PATH = "/content/panacea_oversight_model.zip"
+
+    model.save_pretrained(SAVE_DIR, safe_serialization=True)
+    tokenizer.save_pretrained(SAVE_DIR)
+    print(f"Model saved to: {SAVE_DIR}")
+
+    # List what was saved
+    result = subprocess.run(["ls", "-lh", SAVE_DIR], capture_output=True, text=True)
+    print(result.stdout)
+
+    subprocess.run(["zip", "-r", ZIP_PATH, SAVE_DIR], check=True)
+    print(f"Zipped to: {ZIP_PATH}")
+
+    # Verify zip exists and show size
+    size = subprocess.run(["du", "-sh", ZIP_PATH], capture_output=True, text=True)
+    print(f"Zip size: {size.stdout.strip()}")
+    print("\nDownload: Colab left sidebar → folder icon → right-click panacea_oversight_model.zip → Download")
 
     if hf_repo:
         model.push_to_hub(hf_repo)
