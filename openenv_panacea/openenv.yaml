@@ -1,0 +1,10 @@
+name: panacea_oversight
+version: "1.0.0"
+description: >
+  Adversarial hospital oversight environment. 26 specialist doctor
+  sub-agents propose resource claims; some are deceptive (ghost patients,
+  cost inflation, comorbidity masking). The oversight agent must detect
+  deception using evidence from patient records.
+theme: "multi-agent-interactions"
+sub_theme: "fleet-ai-scalable-oversight"
+author: "Team Panacea"
