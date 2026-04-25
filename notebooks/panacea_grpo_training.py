@@ -390,11 +390,16 @@ def load_model():
 def train(model, tokenizer, dataset):
     from trl import GRPOTrainer, GRPOConfig
 
-    args = GRPOConfig(
+    # Build GRPOConfig — only pass params that exist in this TRL version
+    from trl import GRPOConfig as _GRPOConfig
+    import inspect
+    _grpo_params = inspect.signature(_GRPOConfig.__init__).parameters
+
+    base_kwargs = dict(
         output_dir                  = "panacea_oversight_model",
         num_train_epochs            = 3,
-        per_device_train_batch_size = 2,        # T4 safe: 4-bit + seq 2048
-        gradient_accumulation_steps = 8,        # effective batch = 16
+        per_device_train_batch_size = 2,
+        gradient_accumulation_steps = 8,
         learning_rate               = 2e-5,
         warmup_ratio                = 0.05,
         lr_scheduler_type           = "cosine",
@@ -404,15 +409,30 @@ def train(model, tokenizer, dataset):
         bf16                        = torch.cuda.is_bf16_supported(),
         logging_steps               = 10,
         save_strategy               = "epoch",
-        eval_strategy               = "epoch",
         report_to                   = "none",
-        # GRPO-specific
-        num_generations             = 4,        # responses per prompt compared within group
-        max_new_tokens              = 512,
-        temperature                 = 0.8,
-        top_p                       = 0.9,
-        beta                        = 0.04,     # KL penalty — keep low for 1.5B
+        num_generations             = 4,
+        beta                        = 0.04,
     )
+
+    # eval_strategy vs evaluation_strategy (renamed in newer TrainingArguments)
+    if "eval_strategy" in _grpo_params:
+        base_kwargs["eval_strategy"] = "epoch"
+    else:
+        base_kwargs["evaluation_strategy"] = "epoch"
+
+    # max_completion_length vs max_new_tokens (renamed in TRL >=0.12)
+    if "max_completion_length" in _grpo_params:
+        base_kwargs["max_completion_length"] = 512
+    else:
+        base_kwargs["max_new_tokens"] = 512
+
+    # temperature / top_p — not in all GRPOConfig versions
+    if "temperature" in _grpo_params:
+        base_kwargs["temperature"] = 0.8
+    if "top_p" in _grpo_params:
+        base_kwargs["top_p"] = 0.9
+
+    args = _GRPOConfig(**base_kwargs)
 
     trainer = GRPOTrainer(
         model            = model,
