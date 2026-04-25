@@ -1,0 +1,31 @@
+# Environment — NEVER commit this
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Database files
+telemetry.db
+*.db
+
+# Model weights (large files)
+models/
+*.pt
+*.bin
+*.safetensors
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
