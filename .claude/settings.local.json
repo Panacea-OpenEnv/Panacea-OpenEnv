@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3 /f/panacea/telemetry.db \".schema\")"
+    ]
+  }
+}

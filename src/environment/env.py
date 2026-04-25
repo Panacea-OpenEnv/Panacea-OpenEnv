@@ -1,153 +1,189 @@
+"""
+PanaceaEnv — Self-Contained Gym Environment for RL Training
+
+Does NOT require localhost:8000 or any backend server.
+Uses ScenarioGenerator directly to produce episodes, and scores
+the oversight agent's actions using the arena.py reward table.
+
+Supports OpenEnv observation format: prompt string + metadata.
+
+Usage:
+    env = PanaceaEnv(difficulty=2)
+    obs, info = env.reset()
+    obs, reward, done, truncated, info = env.step(action=2)  # REJECTED
+"""
+
 import gymnasium as gym
 from gymnasium import spaces
-import requests
-from .reward import calculate_reward
+import numpy as np
+
+from ..training.scenario_generator import ScenarioGenerator
+
 
 class PanaceaEnv(gym.Env):
     """
-    OpenEnv-compatible Environment for Project Panacea (Phase 3).
-    Includes Trust Ledger, Decay metrics, and Context Window mapping.
+    Gym-compatible environment for training oversight agents.
+
+    observation_space: Dict with prompt (text) + trust score + step count
+    action_space:      Discrete(3) — 0=APPROVED, 1=PARTIAL, 2=REJECTED
     """
-    
+
+    metadata = {"render_modes": ["human"]}
     MAX_EPISODE_STEPS = 6
 
-    def __init__(self, api_url="http://localhost:8000"):
-        super(PanaceaEnv, self).__init__()
-        self.api_url = api_url
-        self.current_claim = None
-        
-        self.action_space = spaces.Discrete(2) # 0 = Reject, 1 = Accept
+    # ── Zero-sum reward table (from arena.py:_score_match) ────────────────────
+    REWARD_TABLE = {
+        # (action, ground_truth_is_fraud) → reward
+        ("REJECTED", True):   +2.0,   # Correct catch
+        ("APPROVED", True):   -3.0,   # Missed fraud (worst case)
+        ("APPROVED", False):  +1.0,   # Correct approval
+        ("REJECTED", False):  -2.0,   # False rejection (bad for patient care)
+        ("PARTIAL",  True):   -0.5,   # Hedge on fraud — weak
+        ("PARTIAL",  False):  -0.5,   # Hedge on clean — weak
+    }
+
+    ACTION_MAP = {0: "APPROVED", 1: "PARTIAL", 2: "REJECTED"}
+
+    def __init__(self, difficulty: int = 1, seed: int | None = None):
+        super().__init__()
+        self.difficulty = difficulty
+        self.generator = ScenarioGenerator(seed=seed)
+
+        self.action_space = spaces.Discrete(3)
         self.observation_space = spaces.Dict({
-            "claim_text": spaces.Text(max_length=2000),
-            "department_trust": spaces.Box(low=0.0, high=1.0, shape=(1,))
+            "prompt": spaces.Text(max_length=4096),
+            "department_trust": spaces.Box(low=0.0, high=1.0, shape=(1,), dtype=np.float32),
         })
-        
-        # Phase 3 State Tracking 
-        self.schema_adapted_this_episode = False
-        self.last_error = None
+
+        # Dynamic trust ledger (reused from original env.py)
+        self.trust_ledger: dict[str, float] = {}
+        for spec_name in ["Cardiology", "Neurology", "Pulmonology", "Oncology",
+                          "Orthopedics", "General Medicine", "Nephrology",
+                          "Infectious Disease", "Gastroenterology", "Hematology",
+                          "Neurosurgery", "Pediatrics", "Gynecology", "Obstetrics",
+                          "Dermatology", "Ophthalmology", "Otolaryngology",
+                          "Urology", "Endocrinology", "Rheumatology",
+                          "Psychiatry", "Radiology", "Anesthesiology",
+                          "Pathology", "Plastic Surgery", "Vascular Surgery"]:
+            self.trust_ledger[spec_name] = 1.0
+
+        self._scenario: dict = {}
+        self.step_count: int = 0
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
         self.step_count = 0
-        
-        # Dynamic Trust Ledger for Departments
-        self.trust_ledger = {
-            "Cardiology": 1.0,
-            "Pulmonology": 1.0,
-            "Oncology": 1.0,
-            "Neurology": 1.0
+
+        # Decay trust towards 1.0 between episodes
+        self._decay_trust()
+
+        self._scenario = self.generator.generate(difficulty=self.difficulty)
+        obs = self._get_obs()
+        info = {
+            "deception_type": self._scenario["deception_type"],
+            "ground_truth": self._scenario["ground_truth_label"],
+            "difficulty": self._scenario["difficulty"],
+            "department": self._scenario["department"],
+            "num_reports": len(self._scenario.get("reports", [])),
+        }
+        return obs, info
+
+    def step(self, action: int):
+        """
+        Score the oversight agent's action against ground truth.
+
+        Args:
+            action: 0=APPROVED, 1=PARTIAL, 2=REJECTED
+
+        Returns:
+            (observation, reward, terminated, truncated, info)
+        """
+        self.step_count += 1
+
+        # Context exhaustion: force auto-reject with heavy penalty
+        if self.step_count >= self.MAX_EPISODE_STEPS:
+            reward = -2.0  # Timeout penalty
+            obs = self._get_obs()
+            return obs, reward, True, True, {"status": "timeout_exhaustion"}
+
+        action_str = self.ACTION_MAP.get(action, "REJECTED")
+        is_fraud = self._scenario["ground_truth_label"] == "REJECTED"
+
+        # Core reward from zero-sum table
+        reward = self.REWARD_TABLE.get((action_str, is_fraud), 0.0)
+
+        # Step penalty (from nodes.py:263)
+        reward -= self.step_count * 0.05
+
+        # Trust penalty: update ledger based on decision correctness
+        dept = self._scenario.get("department", "Unknown")
+        is_correct = (action_str == self._scenario["ground_truth_label"])
+
+        if not is_correct:
+            self._penalize_trust(dept)
+
+        info = {
+            "action": action_str,
+            "is_correct": is_correct,
+            "deception_type": self._scenario["deception_type"],
+            "ground_truth": self._scenario["ground_truth_label"],
+            "department": dept,
+            "department_trust": self.trust_ledger.get(dept, 1.0),
+            "step_count": self.step_count,
+            "claimed_amount": self._scenario.get("claimed_amount", 0),
+            "expected_cost": self._scenario.get("expected_cost", 0),
+            "fraud_details": self._scenario.get("fraud_details", {}),
+        }
+
+        obs = self._get_obs()
+        return obs, reward, True, False, info
+
+    def render(self):
+        dept = self._scenario.get("department", "Unknown")
+        trust = self.trust_ledger.get(dept, 1.0)
+        dtype = self._scenario.get("deception_type", "unknown")
+        label = self._scenario.get("ground_truth_label", "?")
+        print(
+            f"-- Step {self.step_count}/{self.MAX_EPISODE_STEPS} | "
+            f"Dept: {dept} (Trust: {trust:.2f}) | "
+            f"Deception: {dtype} | Label: {label} --"
+        )
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _get_obs(self) -> dict:
+        dept = self._scenario.get("department", "Unknown")
+        trust = self.trust_ledger.get(dept, 1.0)
+        return {
+            "prompt": self._scenario.get("prompt", ""),
+            "department_trust": np.array([trust], dtype=np.float32),
         }
 
     def _decay_trust(self):
-        """Exponentially pull trust scores towards 1.0 over time (The Boy Who Cried Wolf recovery)."""
+        """Exponential trust recovery toward 1.0 (Boy Who Cried Wolf)."""
         decay_rate = 0.1
         for dept in self.trust_ledger:
             self.trust_ledger[dept] += (1.0 - self.trust_ledger[dept]) * decay_rate
 
     def _penalize_trust(self, department: str, amount: float = 0.3):
         if department in self.trust_ledger:
-            self.trust_ledger[department] -= amount
-            if self.trust_ledger[department] < 0.0:
-                self.trust_ledger[department] = 0.0
+            self.trust_ledger[department] = max(0.0, self.trust_ledger[department] - amount)
 
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        self.schema_adapted_this_episode = False
-        self.last_error = None
-        self.step_count = 0
-        
-        # Decay trust positively going into a new evaluation
-        self._decay_trust()
-        
-        try:
-            response = requests.get(f"{self.api_url}/claims/pending")
-            claims = response.json()
-            if claims:
-                self.current_claim = claims[0]
-                obs = self._get_obs()
-                return obs, {}
-            else:
-                self.current_claim = None
-                return {"claim_text": "No pending claims."}, {}
-        except requests.exceptions.RequestException:
-            return {"claim_text": "API Connection Error"}, {}
 
-    def step(self, action, external_metadata=None):
-        """Executes a step with Phase 3 Trust and Context constraints."""
-        if not self.current_claim:
-            return {"claim_text": "No claims available."}, 0, True, False, {}
+# ── Quick test ────────────────────────────────────────────────────────────────
 
-        self.step_count += 1
-        
-        # CONTEXT LIMIT EXHAUSTION (Tie-breaker/Fallback)
-        if self.step_count >= self.MAX_EPISODE_STEPS:
-            # Force auto-reject and heavy timeout penalty
-            reward = calculate_reward(-1, False, error_state="Timeout")
-            
-            # Post reject to clear queue
-            requests.post(f"{self.api_url}/claims/{self.current_claim['id']}/verify", json={"verdict": False})
-            next_obs, _ = self.reset()
-            return next_obs, reward, True, False, {"status": "timeout_exhaustion"}
+if __name__ == "__main__":
+    env = PanaceaEnv(difficulty=2, seed=42)
 
-        external_metadata = external_metadata or {}
-        current_error = external_metadata.get('error_state')
-        has_adapted = external_metadata.get('schema_adapted', False)
-        
-        has_schema_reward = False
-        if has_adapted and self.last_error == 'ProgrammingError' and not self.schema_adapted_this_episode:
-            self.schema_adapted_this_episode = True
-            has_schema_reward = True
+    for ep in range(5):
+        obs, info = env.reset()
+        print(f"\nEpisode {ep+1}: {info['deception_type']} | GT={info['ground_truth']}")
 
-        self.last_error = current_error
+        # Simulate a "perfect" agent
+        if info["ground_truth"] == "REJECTED":
+            action = 2  # REJECTED
+        else:
+            action = 0  # APPROVED
 
-        if current_error == "ProgrammingError":
-            reward = calculate_reward(-1, False, error_state="ProgrammingError")
-            return self._get_obs(), reward, False, False, {"status": "error_encountered"}
-            
-        if current_error == "Crash":
-            reward = calculate_reward(-1, False, error_state="Crash")
-            return self._get_obs(), reward, True, False, {"status": "crashed"}
-
-        # Final Verification Action
-        try:
-            response = requests.post(
-                f"{self.api_url}/claims/{self.current_claim['id']}/verify",
-                json={"verdict": bool(action == 1)}
-            )
-            result = response.json()
-            is_correct = result.get('correct', False)
-            violation = result.get('violation')
-            department = result.get('department')
-            
-            # Modify trust based on result
-            if violation or not is_correct:
-                if department:
-                    self._penalize_trust(department)
-            
-            reward = calculate_reward(action, is_correct, schema_adapted=has_schema_reward, violation=violation)
-            
-            next_obs, _ = self.reset()
-            return next_obs, reward, True, False, {"correct": is_correct, "violation": violation, "schema_adapted": has_schema_reward}
-            
-        except requests.exceptions.RequestException as e:
-            return self._get_obs(), -0.1, True, False, {"error": str(e)}
-
-    def render(self):
-        dept = self.current_claim.get('department', 'Unknown') if self.current_claim else 'Unknown'
-        trust = self.trust_ledger.get(dept, 1.0)
-        print(f"-- Step {self.step_count}/{self.MAX_EPISODE_STEPS} | Dept: {dept} (Trust: {trust:.2f}) | Error: {self.last_error} --")
-
-    def _get_obs(self):
-        if self.current_claim:
-            dept = self.current_claim.get('department', 'Unknown')
-            trust_score = self.trust_ledger.get(dept, 1.0)
-            
-            text = f"Claim ID: {self.current_claim['id']}, Patient: {self.current_claim['patient_id']}, " \
-                   f"Dept: {dept}, Protocol: {self.current_claim['protocol_id']}, " \
-                   f"Resource: {self.current_claim['requested_resource']}, Amount: ${self.current_claim['claimed_amount']}"
-                   
-            return {
-                "claim_text": text,
-                "department_trust": [trust_score]
-            }
-        return {
-            "claim_text": "None",
-            "department_trust": [0.0]
-        }
+        obs, reward, done, truncated, step_info = env.step(action)
+        print(f"  Action={step_info['action']} | Correct={step_info['is_correct']} | Reward={reward:+.2f}")

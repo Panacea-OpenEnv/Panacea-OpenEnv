@@ -82,45 +82,51 @@ class TTSEngine:
 
     # ── Background worker ─────────────────────────────────────────────────────
 
-    def _worker(self):
-        """Runs in background thread. Speaks items from queue one by one."""
-        engine = pyttsx3.init()
-        engine.setProperty("rate", TTS_RATE)
-
-        # Select voice by gender preference
+    @staticmethod
+    def _resolve_voice_id(engine) -> str | None:
         voices = engine.getProperty("voices")
-        selected = None
         for v in voices:
             if TTS_VOICE in v.name.lower() or TTS_VOICE in v.id.lower():
-                selected = v.id
-                break
-        if not selected and voices:
-            # fallback: female=index 1 if available, else index 0
+                return v.id
+        if voices:
             idx = 1 if TTS_VOICE == "female" and len(voices) > 1 else 0
-            selected = voices[idx].id
-        if selected:
-            engine.setProperty("voice", selected)
+            return voices[idx].id
+        return None
 
+    def _worker(self):
+        """
+        Runs in background thread. Speaks items from queue one by one.
+
+        A fresh pyttsx3 engine is initialized per utterance because Windows
+        SAPI's runAndWait() loop is not safely re-entrant on a long-lived
+        engine — after the first call, subsequent say()+runAndWait() return
+        immediately with no audio, which made only the first nurse statement
+        audible.
+        """
         while self._running:
             try:
                 text = self._queue.get(timeout=0.2)
-                if text is None:
-                    self._queue.task_done()
-                    break
-                engine.say(text)
-                engine.runAndWait()
-                self._queue.task_done()
             except queue.Empty:
                 continue
-            except Exception as e:
-                # Bug 7 fix: log the error instead of silently swallowing
-                print(f"[TTS ERROR] {e}", file=sys.stderr)
-                try:
-                    self._queue.task_done()
-                except Exception:
-                    pass
 
-        engine.stop()
+            if text is None:
+                self._queue.task_done()
+                break
+
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty("rate", TTS_RATE)
+                voice_id = self._resolve_voice_id(engine)
+                if voice_id:
+                    engine.setProperty("voice", voice_id)
+                engine.say(text)
+                engine.runAndWait()
+                engine.stop()
+                del engine
+            except Exception as e:
+                print(f"[TTS ERROR] {e}", file=sys.stderr)
+            finally:
+                self._queue.task_done()
 
 
 # Module-level singleton

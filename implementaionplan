@@ -1,56 +1,176 @@
-Voice Pipeline Bug Fix Plan
-I audited the entire chain: STT → Triage → Specialist GPT → TTS → MongoDB → Oversight. Here are all the bugs I found and the fixes.
+Panacea RL Oversight Agent — Final Implementation Plan
+Theme: Theme #1 — Fleet AI / Scalable Oversight
+Approach: Train Qwen2.5-1.5B with GRPO on Colab → serve via HuggingFace Inference Endpoint → wire local oversight agent to call it live
 
-Root Cause Analysis
-The core problem — "not identifying symptoms properly" and falling into a dead "I'm not sure, could you explain more?" loop — is caused by three interconnected bugs:
+Part A: Voice Pipeline Bug Fixes (approved, partially done)
+(Bugs 1–9 from original plan — Bug 9 / TTS fix already applied to src/voice/tts.py)
 
-Bug 1: STT returns empty string → Whisper base model is too small
-The base Whisper model (74M params) has poor accuracy on noisy or accented speech. When it can't confidently transcribe, it returns "". Line 184 of voice_pipeline.py then replaces empty speech with the fallback "I'm not sure, could you explain more?", which gives GPT-4o nothing useful to work with.
+Part B: RL Oversight Agent
+Constraints confirmed
+No local GPU → inference runs on a remote endpoint (Colab ngrok or HuggingFace Inference API)
+Colab notebook does not yet exist → must be created
+Phase 1: Colab Training Notebook (off-machine)
+File to create: notebooks/panacea_grpo_training.ipynb
+The notebook trains a LoRA-adapted Qwen2.5-1.5B-Instruct using GRPO (Grouped Relative Policy Optimization via trl). GRPO is chosen over PPO because it requires no separate value/critic network — stable for small models on free Colab T4.
 
-IMPORTANT
+Notebook sections
+1 — Install
 
-Fix: Upgrade the Whisper model from base to small in .env. The small model (244M params) is dramatically more accurate on real speech while still running on CPU in ~2 seconds.
+!pip install unsloth trl transformers datasets peft accelerate bitsandbytes
+2 — Dataset construction (synthetic, no external data needed)
 
-Bug 2: JSON detection in on_token is fragile and breaks mid-conversation
-In voice_pipeline.py line 128, the JSON filter checks if not response_so_far and token.strip() == "{". But GPT-4o often starts a conversational turn with whitespace or a newline before the {, which means response_so_far is already non-empty when { arrives. The filter fails, and the TTS tries to read raw JSON syntax aloud — resulting in garbled speech or silence.
+Build ~2000 episodes directly in the notebook using the same deception taxonomy as the local ScenarioGenerator. Each row:
 
-IMPORTANT
+{
+  "prompt": "Patient: John, 52M...\nCardiology report: ...\nNeurology report: ...\n\nAnalyze for fraud.",
+  "ground_truth": "collusion",
+  "label": "REJECTED"
+}
+Deception split: 40% clean, 20% ghost, 20% inflation, 20% collusion.
 
-Fix: Rewrite the JSON filter to check for { anywhere in the accumulated response, not just as the very first non-whitespace token.
+3 — Reward functions (GRPO requires per-sample scalar rewards, not a critic)
 
-Bug 3: _extract_assessment is a greedy JSON parser that triggers on false positives
-In specialist_gpt.py line 252-261, the parser does text.find("{") and text.rfind("}"). If the specialist says something like "Your heart rate is 80, which is normal" and GPT-4o wraps any part in curly braces for emphasis, it will try to parse it as JSON, fail silently, and return None — but in some edge cases it could return a partial dict with ready: false that confuses the flow.
+def format_reward(response: str) -> float:
+    """+0.3 if response is valid JSON with required keys."""
 
-IMPORTANT
+def decision_reward(response: str, ground_truth: str) -> float:
+    """
+    +2.0  correct REJECT on fraud
+    -3.0  missed fraud (false APPROVED)
+    +1.0  correct APPROVED on clean
+    -2.0  false REJECTED on clean
+    +0.5  correct fraud_type identified in fraud_flags
+    +0.1  reasoning field has >50 tokens
+    """
+4 — Model + LoRA config
 
-Fix: Add a minimum-length check and require "ready" key to be present in the parsed JSON before treating it as an assessment.
+model, tokenizer = FastLanguageModel.from_pretrained(
+    "Qwen/Qwen2.5-1.5B-Instruct", load_in_4bit=True, max_seq_length=2048
+)
+model = FastLanguageModel.get_peft_model(
+    model, r=16, lora_alpha=32,
+    target_modules=["q_proj","v_proj","k_proj","o_proj","gate_proj","up_proj","down_proj"]
+)
+5 — GRPO training loop
 
-Additional Issues Found
-Bug 4: TTS _SENTENCE_END regex misses question marks followed by newlines
-The regex (?<=[.!?])\s+ only splits on whitespace after punctuation. But GPT-4o often puts a ? at the end of a line with a \n, and \s in Python regex does match \n — but the streaming token buffer may not have the newline yet, so the question hangs in the buffer unsaid until flush_buffer().
+trainer = GRPOTrainer(
+    model=model, tokenizer=tokenizer,
+    reward_funcs=[format_reward, decision_reward],
+    train_dataset=dataset,
+    args=GRPOConfig(num_train_epochs=3, per_device_train_batch_size=4,
+                    gradient_accumulation_steps=4, learning_rate=2e-5,
+                    output_dir="panacea_oversight_model")
+)
+trainer.train()
+6 — Export
 
-Fix: Also flush the buffer on \n characters in stream_token().
+model.save_pretrained("panacea_oversight_model")
+tokenizer.save_pretrained("panacea_oversight_model")
+# Zip and download, OR push to HuggingFace Hub:
+model.push_to_hub("your-hf-username/panacea-oversight-v1")
+7 — Serve via Colab ngrok (for hackathon demo)
 
-Bug 5: voice_pipeline.py oversight check threshold is too strict
-Line 415: if len(claimants) > 2 means a medication must be prescribed by 3+ specialists to flag as collusion. With only 1-3 specialists per session, this will never trigger.
+from fastapi import FastAPI
+import uvicorn, threading, nest_asyncio
+# POST /generate  →  {prompt} → {decision, fraud_flags, reasoning}
+# expose with: ngrok http 8000
+Phase 2: Local Architecture
+2a. CREATE src/training/scenario_generator.py
+Generates synthetic consultation episodes at 3 difficulty levels using the existing specialists/registry.py deception_profile fields.
 
-Fix: Change to > 1 (2+ specialists prescribing the same drug = flag).
+class ScenarioGenerator:
+    def generate(self, difficulty: int = 1) -> dict:
+        """Returns {patient, vitals, reports[], deception_type, ground_truth_label}"""
 
-Proposed Changes
-[MODIFY] .env
-Change WHISPER_MODEL=base → WHISPER_MODEL=small
-[MODIFY] src/voice/stt.py
-Add a spoken confirmation so the patient knows when the mic is hot and when it stopped
-[MODIFY] src/voice/tts.py
-Fix the sentence buffer to flush on newlines
-[MODIFY] src/voice/voice_pipeline.py
-Rewrite on_token JSON filter to be robust
-Fix oversight collusion threshold from > 2 to > 1
-Add a spoken prompt before each mic recording so the patient knows when to speak
-[MODIFY] src/agents/specialist_gpt.py
-Make _extract_assessment more robust (require "ready" key + minimum length)
-Improve the system prompt to explicitly tell GPT-4o to NEVER include { in conversational text
-Verification Plan
-Run the pipeline in --text mode with a clear complaint like "I have severe chest pain and difficulty breathing" and verify the triage routes to Cardiology + Pulmonology
-Verify specialist produces conversational (non-JSON) responses for turns 1-3 and a clean JSON assessment on the final turn
-Verify the TTS does NOT attempt to read JSON aloud
+    def _inject_ghost(self) -> dict          # fake patient ID, all reports fabricated
+    def _inject_inflation(self, r) -> dict   # real patient, inflated severity score
+    def _inject_collusion(self, rs) -> list  # 2+ specialists share identical drug
+Difficulty curriculum: difficulty=1 → ghost only; difficulty=2 → ghost + inflation; difficulty=3 → all three including collusion.
+
+2b. CREATE src/environment/env.py
+Gym-compatible PanaceaEnv (already imported by src/training/ppo_train.py).
+
+class PanaceaEnv(gym.Env):
+    observation_space = gym.spaces.Dict(...)   # patient + reports
+    action_space      = gym.spaces.Discrete(3) # 0=APPROVED 1=PARTIAL 2=REJECTED
+
+    def reset(self) -> str:
+        """Generate new episode via ScenarioGenerator; return formatted prompt string."""
+
+    def step(self, action: int) -> tuple[str, float, bool, dict]:
+        """Score action against ground_truth using arena reward table; return (obs, reward, done, info)."""
+Reward table (from existing arena.py:_score_match()):
+
+Oversight action	Ground truth	Reward
+REJECTED	fraud	+2.0
+APPROVED	fraud	-3.0
+APPROVED	clean	+1.0
+REJECTED	clean	-2.0
+2c. CREATE src/inference/inference_server.py
+Thin HTTP client that calls the remote Colab/HuggingFace endpoint. No local GPU needed.
+
+OVERSIGHT_ENDPOINT = os.getenv("OVERSIGHT_ENDPOINT")  # e.g. https://abc.ngrok.io/generate
+OVERSIGHT_API_KEY  = os.getenv("OVERSIGHT_API_KEY", "")
+
+async def query_oversight_model(prompt: str) -> dict:
+    """POST prompt to remote endpoint; return parsed {decision, fraud_flags, reasoning}."""
+    resp = await httpx.AsyncClient().post(
+        OVERSIGHT_ENDPOINT,
+        json={"prompt": prompt},
+        headers={"Authorization": f"Bearer {OVERSIGHT_API_KEY}"},
+        timeout=30.0,
+    )
+    return _parse_response(resp.json()["text"])
+
+def _parse_response(text: str) -> dict:
+    """Extract JSON from model output; fall back to deterministic rules on parse failure."""
+The fallback to deterministic rules on parse failure means production never breaks if the model is unreachable.
+
+2d. MODIFY src/agents/oversight.py
+Replace the if "Hemophilia" in db_result deterministic block with a call to inference_server.query_oversight_model() when OVERSIGHT_ENDPOINT is set in .env. Keep deterministic path as fallback.
+
+async def _process_claim(event):
+    obs_prompt = _format_observation(event)       # patient + reports → string
+    if os.getenv("OVERSIGHT_ENDPOINT"):
+        result = await query_oversight_model(obs_prompt)
+    else:
+        result = _deterministic_fallback(event)   # existing logic unchanged
+
+    decision = result["decision"]                 # APPROVED | PARTIAL | REJECTED
+    fraud_flags = result["fraud_flags"]
+    reasoning = result["reasoning"]
+    # publish VerificationDecisionEvent as before
+New helper _format_observation(event) -> str formats the full patient + specialist report context as a prompt the model was trained on.
+
+2e. CREATE scripts/demo_hackathon.py
+python scripts/demo_hackathon.py --difficulty 3 --use-rl-model
+Calls ScenarioGenerator(difficulty=3) to build a hard collusion scenario
+Feeds it to the oversight agent (which calls the remote model)
+Streams reasoning token-by-token to terminal
+Prints final verdict + fraud flags
+Scores the decision via PanaceaEnv.step() and displays the reward
+--use-rl-model flag sets OVERSIGHT_ENDPOINT at runtime if not already in .env, so the demo works even if the notebook is still running.
+
+Files Summary
+Action	Path
+CREATE	notebooks/panacea_grpo_training.ipynb
+CREATE	src/training/scenario_generator.py
+CREATE	src/environment/env.py
+CREATE	src/inference/inference_server.py
+MODIFY	src/agents/oversight.py
+CREATE	scripts/demo_hackathon.py
+MODIFY	.env — add OVERSIGHT_ENDPOINT, OVERSIGHT_API_KEY
+Existing code to reuse (no duplication)
+Reuse	Where
+_score_match() reward table	arena.py:46 — import directly into PanaceaEnv.step()
+deception_profile per specialty	specialists/registry.py — drive ScenarioGenerator
+log_event() telemetry	backend/telemetry.py:35 — log every inference call
+VerificationDecisionEvent	oversight.py — reuse existing event type
+Step penalty step_count * 0.05	nodes.py:264 — apply in PanaceaEnv
+Verification
+Notebook sanity: Run 10 training steps on Colab T4; verify reward/mean increases from step 1 → 10.
+Endpoint smoke test: curl -X POST $OVERSIGHT_ENDPOINT/generate -d '{"prompt":"test"}' → 200 + JSON body.
+ScenarioGenerator: generate(difficulty=3) → ≥2 specialist reports contain the same drug name.
+PanaceaEnv: env.step(action=0) on a fraud scenario → reward == -3.0; env.step(action=2) → reward == +2.0.
+Full demo run: python scripts/demo_hackathon.py --difficulty 3 --use-rl-model — model responds in <30s, reasoning field contains >50 tokens, fraud_flags is non-empty.
+Fallback test: Unset OVERSIGHT_ENDPOINT; run again — deterministic fallback activates, no crash.

@@ -60,17 +60,30 @@ async def _run_intake_phase(
     """Run nurse interview then return structured complaint + routing."""
 
     intake_turn_signal: asyncio.Queue = asyncio.Queue()
+    response_buffer = []
+    json_detected = False
+
+    def on_token(token: str):
+        nonlocal json_detected
+        response_buffer.append(token)
+        so_far = "".join(response_buffer).lstrip()
+        if so_far.startswith("{"):
+            json_detected = True
+        if not json_detected:
+            tts.stream_token(token)
 
     def on_intake_turn(turn_info: dict):
-        # Pass the full turn to the async loop — do NOT call tts here
-        # (calling tts.speak from a sync callback inside the event loop
-        #  causes pyttsx3 on Windows to queue audio but not play it)
-        intake_turn_signal.put_nowait(turn_info)
+        nonlocal json_detected
+        if not json_detected:
+            tts.flush_buffer()
+        intake_turn_signal.put_nowait({**turn_info, "buffer": "".join(response_buffer)})
+        response_buffer.clear()
+        json_detected = False
 
     nurse_task = asyncio.create_task(
         run_intake_interview(
             initial_complaint=initial_complaint,
-            on_token=None,
+            on_token=on_token,
             on_turn_complete=on_intake_turn,
             voice_mode=True,
         )
@@ -87,10 +100,8 @@ async def _run_intake_phase(
             is_json = response_text.lstrip().startswith("{")
 
             if response_text and not is_json:
-                # Display question in terminal
+                # Display question in terminal (audio was already streamed sentence-by-sentence)
                 display.nurse_question(response_text)
-                # Speak via TTS — called from async context for reliable pyttsx3 behaviour
-                tts.speak(response_text)
                 await loop.run_in_executor(None, tts.wait_until_done)
 
             # If this was the final JSON summary turn, nurse_task will be done

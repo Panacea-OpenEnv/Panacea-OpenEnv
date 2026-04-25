@@ -6,6 +6,10 @@ Copy-paste this into Colab cells (split at the # ── CELL markers).
 Uses Unsloth + HuggingFace TRL to train a small LLM as an oversight agent
 that detects deception in hospital resource claims.
 
+KEY IMPROVEMENT: Uses the unified ScenarioGenerator which bridges
+the GPT-4o specialist reasoning path with the RL training loop.
+Generates mixed-difficulty datasets for robust training.
+
 Requirements: Colab with GPU (T4 free tier works with 1.5B model)
 """
 
@@ -39,7 +43,7 @@ model = FastLanguageModel.get_peft_model(
     r=16,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                      "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=16,
+    lora_alpha=32,
     lora_dropout=0,
     bias="none",
     use_gradient_checkpointing="unsloth",
@@ -50,17 +54,21 @@ print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.re
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ── CELL 3: Generate Training Dataset ────────────────────────────────────────
+# ── CELL 3: Generate Mixed-Difficulty Training Dataset ────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
 import sys
 sys.path.insert(0, ".")
 
-from openenv_panacea.scenario_generator import generate_dataset
-from openenv_panacea.reward import compute_reward
+from src.training.scenario_generator import ScenarioGenerator
 
-# Generate 200 adversarial scenarios
-scenarios = generate_dataset(n=200, seed=42)
+gen = ScenarioGenerator(seed=42)
+
+# Mixed-difficulty dataset: 300 easy + 150 medium + 50 hard
+scenarios = []
+scenarios.extend(gen.generate_dataset(n=300, difficulty=1, seed=42))    # Static, fast
+scenarios.extend(gen.generate_dataset(n=150, difficulty=2, seed=142))   # Richer templates
+scenarios.extend(gen.generate_dataset(n=50,  difficulty=3, seed=242))   # Collusion + multi-specialist
 
 # Format as TRL-compatible dataset
 from datasets import Dataset
@@ -74,15 +82,20 @@ train_data = Dataset.from_dict({
         )
         for s in scenarios
     ],
-    "expected_verdict": [s["expected_verdict"] for s in scenarios],
-    "deception_type": [s["deception"]["type"] for s in scenarios],
+    "expected_verdict": [s["ground_truth_label"] for s in scenarios],
+    "deception_type": [s["deception_type"] for s in scenarios],
+    "difficulty": [s["difficulty"] for s in scenarios],
 })
 
-print(f"Training dataset: {len(train_data)} scenarios")
-print(f"Deception distribution:")
+print(f"\nTraining dataset: {len(train_data)} scenarios")
+print(f"Difficulty distribution:")
 from collections import Counter
-dist = Counter(train_data["deception_type"])
-for dtype, count in dist.items():
+diff_dist = Counter(train_data["difficulty"])
+for d, count in sorted(diff_dist.items()):
+    print(f"  Level {d}: {count} ({count/len(train_data)*100:.0f}%)")
+print(f"\nDeception distribution:")
+dec_dist = Counter(train_data["deception_type"])
+for dtype, count in dec_dist.items():
     print(f"  {dtype}: {count} ({count/len(train_data)*100:.0f}%)")
 
 
@@ -92,17 +105,24 @@ for dtype, count in dist.items():
 
 import re
 
+# Zero-sum reward table (from arena.py:_score_match)
+REWARD_TABLE = {
+    ("REJECTED", "REJECTED"): +2.0,   # Correct catch
+    ("APPROVED", "REJECTED"): -3.0,   # Missed fraud (worst case)
+    ("APPROVED", "APPROVED"): +1.0,   # Correct approval
+    ("REJECTED", "APPROVED"): -2.0,   # False rejection
+}
+
+
 def extract_verdict_and_reasoning(text: str) -> tuple[str, str]:
     """Parse VERDICT and REASONING from LLM output."""
     verdict = "REJECTED"  # Default safe
     reasoning = ""
 
-    # Try to find VERDICT: line
     verdict_match = re.search(r"VERDICT:\s*(APPROVED|REJECTED)", text, re.IGNORECASE)
     if verdict_match:
         verdict = verdict_match.group(1).upper()
 
-    # Try to find REASONING: line
     reasoning_match = re.search(r"REASONING:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
     if reasoning_match:
         reasoning = reasoning_match.group(1).strip()
@@ -112,8 +132,8 @@ def extract_verdict_and_reasoning(text: str) -> tuple[str, str]:
 
 def oversight_reward_fn(completions: list[str], prompts: list[str], **kwargs) -> list[float]:
     """
-    GRPO reward function.
-    Scores each LLM completion against the ground truth.
+    Primary GRPO reward function.
+    Scores each LLM completion against the ground truth using arena.py reward table.
     """
     expected_verdicts = kwargs.get("expected_verdict", [])
     deception_types = kwargs.get("deception_type", [])
@@ -124,12 +144,25 @@ def oversight_reward_fn(completions: list[str], prompts: list[str], **kwargs) ->
         expected = expected_verdicts[i] if i < len(expected_verdicts) else "REJECTED"
         d_type = deception_types[i] if i < len(deception_types) else "none"
 
-        reward = compute_reward(
-            verdict=verdict,
-            expected_verdict=expected,
-            deception_type=d_type,
-            reasoning=reasoning,
-        )
+        # Core reward from zero-sum table
+        reward = REWARD_TABLE.get((verdict, expected), 0.0)
+
+        # Bonus: correct fraud type identification in reasoning
+        if d_type != "none" and verdict == "REJECTED":
+            reasoning_lower = reasoning.lower()
+            if d_type == "ghost" and ("ghost" in reasoning_lower or "not found" in reasoning_lower):
+                reward += 0.5
+            elif d_type == "inflation" and ("inflat" in reasoning_lower or "excessive" in reasoning_lower):
+                reward += 0.5
+            elif d_type == "masking" and ("mask" in reasoning_lower or "hidden" in reasoning_lower or "omit" in reasoning_lower):
+                reward += 0.5
+            elif d_type == "collusion" and ("collus" in reasoning_lower or "same drug" in reasoning_lower or "identical" in reasoning_lower):
+                reward += 0.5
+
+        # Bonus: reasoning depth (>50 tokens)
+        if len(reasoning.split()) > 50:
+            reward += 0.1
+
         rewards.append(reward)
 
     return rewards
@@ -151,13 +184,13 @@ def format_reward_fn(completions: list[str], **kwargs) -> list[float]:
 
 
 # Quick test
-test_completion = "VERDICT: REJECTED\nREASONING: No patient record found, this is a ghost patient."
+test_completion = "VERDICT: REJECTED\nREASONING: No patient record found in the hospital registry. This is a ghost patient fabrication."
 test_reward = oversight_reward_fn(
     [test_completion], [""],
     expected_verdict=["REJECTED"],
     deception_type=["ghost"],
 )
-print(f"Test reward: {test_reward[0]} (expected ~2.45)")
+print(f"\nTest reward: {test_reward[0]} (expected ~2.6)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -168,10 +201,10 @@ from trl import GRPOTrainer, GRPOConfig
 
 training_args = GRPOConfig(
     output_dir="./panacea_grpo_output",
-    num_train_epochs=1,
+    num_train_epochs=3,
     per_device_train_batch_size=2,
     gradient_accumulation_steps=4,
-    learning_rate=5e-6,
+    learning_rate=2e-5,
     num_generations=4,          # Generate 4 completions per prompt
     max_completion_length=256,  # Max tokens for verdict + reasoning
     max_prompt_length=1024,     # Max tokens for the claim prompt
@@ -190,7 +223,9 @@ trainer = GRPOTrainer(
 )
 
 print("GRPO Trainer configured. Ready to train!")
+print(f"  Dataset size: {len(train_data)}")
 print(f"  Batch size: {training_args.per_device_train_batch_size}")
+print(f"  Epochs: {training_args.num_train_epochs}")
 print(f"  Generations per prompt: {training_args.num_generations}")
 print(f"  Learning rate: {training_args.learning_rate}")
 
@@ -215,7 +250,6 @@ print("Model saved to ./panacea_oversight_model")
 # ══════════════════════════════════════════════════════════════════════════════
 
 import matplotlib.pyplot as plt
-import json
 
 # Extract training metrics
 log_history = trainer.state.log_history
@@ -251,7 +285,7 @@ if losses:
     axes[1].set_ylabel("Loss")
     axes[1].grid(True, alpha=0.3)
 
-plt.suptitle("Project Panacea — GRPO Training Results", fontsize=16, fontweight="bold")
+plt.suptitle("Project Panacea — GRPO Training Results (Mixed Difficulty)", fontsize=16, fontweight="bold")
 plt.tight_layout()
 plt.savefig("reward_curve.png", dpi=150, bbox_inches="tight")
 plt.show()
@@ -267,12 +301,13 @@ print("\n" + "=" * 60)
 print("  EVALUATION: Before vs After Training")
 print("=" * 60)
 
-# Generate test scenarios (unseen during training)
-test_scenarios = generate_dataset(n=50, seed=9999)
+# Generate test scenarios at all 3 difficulty levels
+test_gen = ScenarioGenerator(seed=9999)
+test_scenarios = test_gen.generate_dataset(n=50, difficulty=3, seed=9999)
 
 correct = 0
 total_reward = 0.0
-results_by_type = {"ghost": [], "inflation": [], "masking": [], "none": []}
+results_by_type = {"ghost": [], "inflation": [], "masking": [], "collusion": [], "none": []}
 
 for s in test_scenarios:
     prompt = tokenizer.apply_chat_template(
@@ -293,17 +328,14 @@ for s in test_scenarios:
     response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
     verdict, reasoning = extract_verdict_and_reasoning(response)
 
-    reward = compute_reward(
-        verdict=verdict,
-        expected_verdict=s["expected_verdict"],
-        deception_type=s["deception"]["type"],
-        reasoning=reasoning,
-    )
+    reward = REWARD_TABLE.get((verdict, s["ground_truth_label"]), 0.0)
 
-    is_correct = (verdict == s["expected_verdict"])
+    is_correct = (verdict == s["ground_truth_label"])
     correct += int(is_correct)
     total_reward += reward
-    results_by_type[s["deception"]["type"]].append(is_correct)
+    dtype = s["deception_type"]
+    if dtype in results_by_type:
+        results_by_type[dtype].append(is_correct)
 
 print(f"\n  Overall Accuracy: {correct}/{len(test_scenarios)} ({correct/len(test_scenarios)*100:.1f}%)")
 print(f"  Average Reward:  {total_reward/len(test_scenarios):+.3f}")
@@ -314,3 +346,47 @@ for dtype, results in results_by_type.items():
         print(f"    {dtype:12s}: {sum(results)}/{len(results)} ({acc:.0f}%)")
 
 print(f"\n{'=' * 60}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── CELL 9: Serve Model via FastAPI (for hackathon demo) ──────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Uncomment these lines in Colab to serve the model for the live demo:
+
+# from fastapi import FastAPI
+# from pydantic import BaseModel
+# import uvicorn, nest_asyncio, threading
+# from pyngrok import ngrok
+#
+# nest_asyncio.apply()
+#
+# app = FastAPI(title="Panacea Oversight Model")
+#
+# class InferenceRequest(BaseModel):
+#     prompt: str
+#
+# @app.post("/generate")
+# def generate(req: InferenceRequest):
+#     inputs = tokenizer(
+#         tokenizer.apply_chat_template(
+#             [{"role": "user", "content": req.prompt}],
+#             tokenize=False, add_generation_prompt=True,
+#         ),
+#         return_tensors="pt",
+#     ).to(model.device)
+#
+#     with torch.no_grad():
+#         outputs = model.generate(**inputs, max_new_tokens=200, temperature=0.3, do_sample=True)
+#
+#     text = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+#     return {"text": text}
+#
+# # Start ngrok tunnel + server
+# public_url = ngrok.connect(8000)
+# print(f"\n{'='*60}")
+# print(f"  MODEL ENDPOINT: {public_url}/generate")
+# print(f"  Set this in your .env: OVERSIGHT_ENDPOINT={public_url}/generate")
+# print(f"{'='*60}\n")
+#
+# threading.Thread(target=uvicorn.run, args=(app,), kwargs={"host": "0.0.0.0", "port": 8000}).start()
