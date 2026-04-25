@@ -285,32 +285,192 @@ for s in test_scenarios:
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=200,
-            temperature=0.3,
-            do_sample=True,
+            max_new_tokens = 512,
+            temperature    = 0.1,
+            top_p          = 0.9,
+            do_sample      = True,
+            pad_token_id   = tokenizer.eos_token_id,
+        )
+    new_tokens = out[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
+def evaluate(model, tokenizer, dataset):
+    from unsloth import FastLanguageModel as FLM
+    FLM.for_inference(model)
+
+    samples = dataset["test"].select(range(min(50, len(dataset["test"]))))
+    results = {"tp": 0, "tn": 0, "fp": 0, "fn": 0, "parse_errors": 0}
+    type_breakdown = Counter()
+
+    for sample in samples:
+        response  = run_inference(model, tokenizer, sample["prompt"])
+        verdict   = parse_verdict(response)
+        actual    = sample["expected_verdict"]
+        dec_type  = sample["deception_type"]
+
+        if verdict is None:
+            results["parse_errors"] += 1
+            continue
+
+        if   actual == "REJECTED" and verdict == "REJECTED": results["tp"] += 1
+        elif actual == "APPROVED" and verdict == "APPROVED": results["tn"] += 1
+        elif actual == "APPROVED" and verdict == "REJECTED": results["fp"] += 1
+        elif actual == "REJECTED" and verdict == "APPROVED":
+            results["fn"] += 1
+            type_breakdown[dec_type] += 1  # which fraud types are being missed?
+
+    total     = sum(results.values())
+    correct   = results["tp"] + results["tn"]
+    precision = results["tp"] / max(results["tp"] + results["fp"], 1)
+    recall    = results["tp"] / max(results["tp"] + results["fn"], 1)
+    f1        = 2 * precision * recall / max(precision + recall, 1e-9)
+
+    print(f"\n{'='*45}")
+    print(f" Eval Results  (n={total})")
+    print(f"{'='*45}")
+    print(f" Accuracy  : {correct/total*100:.1f}%")
+    print(f" Precision : {precision*100:.1f}%")
+    print(f" Recall    : {recall*100:.1f}%")
+    print(f" F1 Score  : {f1*100:.1f}%")
+    print(f" False Negatives (missed fraud): {results['fn']}  <- must be 0")
+    print(f" Missed by type : {dict(type_breakdown)}")
+    print(f" Parse errors   : {results['parse_errors']}")
+    print(f"{'='*45}\n")
+
+
+# ── Section 7 — Export ────────────────────────────────────────────────────────
+def export_model(model, tokenizer, hf_repo: str = ""):
+    import subprocess
+
+    # Always save to /content/ so it's visible in Colab file browser
+    SAVE_DIR = "/content/panacea_oversight_model"
+    ZIP_PATH = "/content/panacea_oversight_model.zip"
+
+    model.save_pretrained(SAVE_DIR, safe_serialization=True)
+    tokenizer.save_pretrained(SAVE_DIR)
+    print(f"Model saved to: {SAVE_DIR}")
+
+    # List what was saved
+    result = subprocess.run(["ls", "-lh", SAVE_DIR], capture_output=True, text=True)
+    print(result.stdout)
+
+    subprocess.run(["zip", "-r", ZIP_PATH, SAVE_DIR], check=True)
+    print(f"Zipped to: {ZIP_PATH}")
+
+    # Verify zip exists and show size
+    size = subprocess.run(["du", "-sh", ZIP_PATH], capture_output=True, text=True)
+    print(f"Zip size: {size.stdout.strip()}")
+    print("\nDownload: Colab left sidebar → folder icon → right-click panacea_oversight_model.zip → Download")
+
+    if hf_repo:
+        model.push_to_hub(hf_repo)
+        tokenizer.push_to_hub(hf_repo)
+        print(f"Pushed to: https://huggingface.co/{hf_repo}")
+
+
+# ── Section 8 — FastAPI server + ngrok (hackathon demo) ───────────────────────
+def serve(model, tokenizer, ngrok_token: str = ""):
+    import nest_asyncio, uvicorn
+    from fastapi import FastAPI, HTTPException
+    from pydantic import BaseModel as PBase
+
+    nest_asyncio.apply()
+
+    from unsloth import FastLanguageModel as FLM
+    FLM.for_inference(model)
+
+    app = FastAPI(title="Panacea Oversight Agent", version="1.0")
+
+    class ClaimRequest(PBase):
+        claim_text: str          # same field name as PanaceaEnv observation
+        temperature: float = 0.1
+
+    class OversightResponse(PBase):
+        verdict: str             # APPROVED or REJECTED
+        reasoning: str
+        raw_output: str
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok", "model": "panacea-oversight-v1"}
+
+    @app.post("/analyze", response_model=OversightResponse)
+    def analyze(req: ClaimRequest):
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": req.claim_text},
+        ]
+        raw     = run_inference(model, tokenizer, messages)
+        verdict = parse_verdict(raw)
+        if verdict is None:
+            raise HTTPException(status_code=422,
+                                detail=f"Model did not return a valid VERDICT. Output: {raw[:300]}")
+        return OversightResponse(
+            verdict    = verdict,
+            reasoning  = parse_reasoning(raw),
+            raw_output = raw,
         )
 
-    response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-    verdict, reasoning = extract_verdict_and_reasoning(response)
+    # ngrok public tunnel
+    if ngrok_token:
+        from pyngrok import ngrok, conf
+        conf.get_default().auth_token = ngrok_token
+        public_url = ngrok.connect(8000).public_url
+        print(f"\n{'='*50}")
+        print(f"PUBLIC URL : {public_url}")
+        print(f"Swagger UI : {public_url}/docs")
+        print(f"Analyze    : POST {public_url}/analyze")
+        print(f"{'='*50}\n")
+    else:
+        print("Local server: http://localhost:8000  (Swagger: /docs)")
 
-    reward = compute_reward(
-        verdict=verdict,
-        expected_verdict=s["expected_verdict"],
-        deception_type=s["deception"]["type"],
-        reasoning=reasoning,
-    )
+    def _run():
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
 
-    is_correct = (verdict == s["expected_verdict"])
-    correct += int(is_correct)
-    total_reward += reward
-    results_by_type[s["deception"]["type"]].append(is_correct)
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    print("Server started.")
+    t.join()   # blocks when run as a script; Ctrl-C to stop
 
-print(f"\n  Overall Accuracy: {correct}/{len(test_scenarios)} ({correct/len(test_scenarios)*100:.1f}%)")
-print(f"  Average Reward:  {total_reward/len(test_scenarios):+.3f}")
-print(f"\n  Accuracy by deception type:")
-for dtype, results in results_by_type.items():
-    if results:
-        acc = sum(results) / len(results) * 100
-        print(f"    {dtype:12s}: {sum(results)}/{len(results)} ({acc:.0f}%)")
 
-print(f"\n{'=' * 60}")
+# ── Quick demo: show a sample prompt/response before training ─────────────────
+def demo_sample(dataset):
+    sample = dataset["train"][0]
+    print("\n--- Sample training prompt ---")
+    for msg in sample["prompt"]:
+        print(f"[{msg['role'].upper()}]\n{msg['content']}\n")
+    print(f"Expected verdict : {sample['expected_verdict']}")
+    print(f"Deception type   : {sample['deception_type']}")
+    print("------------------------------\n")
+
+
+# ── Entry Point ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    SKIP_TRAIN  = os.getenv("SKIP_TRAIN",       "0") == "1"
+    DO_SERVE    = os.getenv("SERVE",            "0") == "1"
+    HF_REPO     = os.getenv("HF_REPO",           "")
+    NGROK_TOKEN = os.getenv("NGROK_AUTH_TOKEN",  "")
+    N_EPISODES  = int(os.getenv("N_EPISODES",  "2000"))
+
+    # Build dataset from Panacea sub-agent generators
+    dataset = build_hf_dataset()
+    demo_sample(dataset)
+
+    if not SKIP_TRAIN:
+        model, tokenizer = load_model()
+        train(model, tokenizer, dataset)
+        export_model(model, tokenizer, hf_repo=HF_REPO)
+    else:
+        # Load an already-saved checkpoint
+        from unsloth import FastLanguageModel
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name     = "panacea_oversight_model",
+            max_seq_length = 2048,
+            load_in_4bit   = True,
+        )
+
+    evaluate(model, tokenizer, dataset)
+
+    if DO_SERVE:
+        serve(model, tokenizer, ngrok_token=NGROK_TOKEN)

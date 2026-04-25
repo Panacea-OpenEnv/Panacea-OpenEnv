@@ -30,6 +30,7 @@ from ..agents.intake_nurse import run_intake_interview, inject_intake_reply
 from ..agents.smart_router import route_complaint
 from ..agents.specialist_gpt import run_specialist_consultation, inject_patient_reply
 from ..agents.consult_bridge import detect_consult_request, run_consult
+from ..agents.agent_council import detect_primary_specialist, run_council
 from ..database.mongo_client import get_patient, save_consultation, save_medical_summary
 from ..utils.terminal_display import display
 
@@ -408,20 +409,72 @@ async def run_voice_session(
     complaint = complaint or "I have a general health concern."
     display.patient_speech(complaint)
 
-    # ── Phase 1: Intake nurse interviews patient ───────────────────────────────
-    display.info("Intake nurse gathering detailed symptom information...")
-    structured = await _run_intake_phase(complaint, text_mode, loop)
+    # ── Phase 1: Immediately detect primary specialist from first complaint ─────
+    display.info("Detecting primary specialist from complaint...")
+    detection = await detect_primary_specialist(complaint)
+    primary   = detection["primary_specialist"]
     display.info(
-        f"Intake complete — Chief: {structured.get('chief_complaint', '?')} | "
-        f"Duration: {structured.get('duration', '?')} | "
-        f"Severity: {structured.get('severity', '?')}"
+        f"Primary specialist detected: {primary} "
+        f"(confidence: {detection['confidence']}) — {detection['reason']}"
     )
 
-    # ── Phase 2: Smart routing ─────────────────────────────────────────────────
-    tts.speak("Thank you. I have all the information I need. Let me connect you to the right specialist now.")
+    # ── Phase 2: Internal agent council (doctor-to-doctor, shown on terminal) ───
+    # Doctors consult each other BEFORE asking the patient anything further.
+    # Patient is NOT involved here — this is purely internal clinical reasoning.
+    display.info("Launching internal agent council...")
+    council = await run_council(primary, complaint)
+
+    # ── Phase 3: Doctor interviews patient using council-generated questions ────
+    # TTS speaks each question; patient answers via voice or text.
+    tts.speak(
+        f"Thank you for telling me that. I am Doctor {council['primary_role']}. "
+        f"I have a few targeted questions for you."
+    )
+    await loop.run_in_executor(None, tts.wait_until_done)
+
+    patient_answers: list[dict] = []
+    for i, question in enumerate(council["patient_questions"], 1):
+        display.nurse_question(f"[Dr. {council['primary_role']}] {question}")
+        tts.speak(question)
+        # wait for TTS to finish before capturing patient reply
+        await loop.run_in_executor(None, tts.wait_until_done)
+
+        if text_mode:
+            print(f"\nYour answer: ", end="", flush=True)
+            answer = input().strip()
+        else:
+            await loop.run_in_executor(None, stt.flush_input_buffer)
+            display.patient_listening()
+            answer = await loop.run_in_executor(None, stt.record_until_silence)
+
+        answer = answer or "I am not sure."
+        display.patient_speech(answer)
+        patient_answers.append({"question": question, "answer": answer})
+
+    # Build structured intake from council + patient answers
+    qa_text = "\n".join(f"Q: {a['question']}\nA: {a['answer']}" for a in patient_answers)
+    structured = {
+        "chief_complaint": complaint,
+        "council_assessment": council["primary_assessment"],
+        "peer_opinions": [p["opinion"] for p in council["peer_opinions"]],
+        "patient_qa": qa_text,
+        "severity": "moderate",
+        "severity_signals": [],
+        "associated_symptoms": [],
+        "modifiers": {},
+        "suspected_systems": [primary],
+        "duration": "as described by patient",
+    }
+
+    # ── Phase 4: Smart routing (primary already known, may add secondary) ──────
+    tts.speak("Thank you. Let me now connect you with the specialist team.")
     routing = await route_complaint(structured)
 
-    specialists: list[str] = routing.get("specialists", ["General Medicine"])[:3]
+    # Always lead with council's detected primary
+    specialists_raw: list[str] = routing.get("specialists", [primary])
+    if primary not in specialists_raw:
+        specialists_raw.insert(0, primary)
+    specialists: list[str] = specialists_raw[:3]
     urgency:     str       = routing.get("urgency", "medium")
     reason:      str       = routing.get("routing_reason", "")
 
@@ -429,7 +482,7 @@ async def run_voice_session(
         patient_id=patient_id,
         session_id=session_id,
         urgency=urgency,
-        symptoms=[structured.get("chief_complaint", complaint[:60])],
+        symptoms=[complaint[:60]],
     )
     display.router(specialists, urgency)
     display.info(f"Routing reason: {reason}")
