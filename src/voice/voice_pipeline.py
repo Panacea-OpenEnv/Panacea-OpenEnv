@@ -1,209 +1,262 @@
 """
-Voice Pipeline — Panacea Patient Intake
+Voice Pipeline — Panacea Patient Intake (Full Proper Flow)
 
-Full end-to-end voice conversation loop:
+Flow:
   1. Greet patient (TTS)
-  2. Record initial complaint (STT via faster-whisper)
-  3. GPT-4o triage → decide which specialists to activate
-  4. Per specialist: multi-turn voice conversation
+  2. Patient states complaint (STT)
+  3. Intake Nurse interviews patient (3-5 clarifying Q&A turns)
+  4. Smart Router assigns specialist(s) based on structured intake summary
+  5. Per specialist: multi-turn voice consultation
        - GPT-4o streams tokens → TTS speaks sentence-by-sentence
-       - Patient speaks → STT transcribes → injected into specialist queue
-  5. Synthesize all specialist reports
-  6. Save session to MongoDB (patient_consultations + medical_summaries)
-  7. TTS reads final summary aloud
+       - Patient speaks → STT transcribes → injected into specialist
+       - If specialist requests consult, bridge runs cross-specialist Q&A
+  6. Synthesize all specialist reports → rich prescription
+  7. Save session to MongoDB
+  8. TTS reads final prescription aloud
 
 Usage:
-  # Voice mode (microphone required)
   python -m src.voice.voice_pipeline P1001
-
-  # Text mode (keyboard input — no microphone required)
   python -m src.voice.voice_pipeline P1001 --text
 """
 
 import asyncio
-import json
 import uuid
-import os
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 
 from .stt import stt
 from .tts import tts
+from ..agents.intake_nurse import run_intake_interview, inject_intake_reply
+from ..agents.smart_router import route_complaint
 from ..agents.specialist_gpt import run_specialist_consultation, inject_patient_reply
+from ..agents.consult_bridge import detect_consult_request, run_consult
 from ..database.mongo_client import get_patient, save_consultation, save_medical_summary
 from ..utils.terminal_display import display
 
 load_dotenv()
 
-_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-_MODEL  = os.getenv("OPENAI_MODEL", "gpt-4o")
-
-_TRIAGE_PROMPT = """\
-You are a Chief Medical Officer triage AI at Panacea Hospital.
-Given a patient's spoken complaint, output ONLY valid JSON (no explanation):
-
-{
-  "specialists": ["Specialty1", "Specialty2"],
-  "urgency": "critical|high|medium|low",
-  "symptoms": ["symptom1", "symptom2"]
-}
-
-Choose 1-3 specialties from EXACTLY this list (no other values allowed):
-Cardiology, Neurology, Neurosurgery, Orthopedics, Pediatrics, Gynecology,
-Obstetrics, Dermatology, Ophthalmology, Otolaryngology, Gastroenterology,
-Pulmonology, Nephrology, Urology, Endocrinology, Oncology, Hematology,
-Rheumatology, Psychiatry, Radiology, Anesthesiology, General Medicine,
-Pathology, Plastic Surgery, Vascular Surgery, Infectious Disease
-
-Rules:
-- chest pain / left arm pain / sweating → Cardiology (urgency=critical)
-- stroke / facial droop / speech slur → Neurology (urgency=critical)
-- difficulty breathing → Pulmonology or Cardiology (urgency=critical)
-- loss of consciousness → Neurology + Anesthesiology (urgency=critical)
-- high fever / infection → Infectious Disease or General Medicine
-- Always include at least one specialist
-- For unclear complaints use General Medicine"""
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Triage
+# Shared patient reply for consult bridge
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _triage_complaint(complaint: str) -> dict:
-    """Call GPT-4o to classify complaint → specialists + urgency."""
-    try:
-        resp = await _client.chat.completions.create(
-            model=_MODEL,
-            messages=[
-                {"role": "system", "content": _TRIAGE_PROMPT},
-                {"role": "user",   "content": f"Patient says: {complaint}"},
-            ],
-            temperature=0.1,
-            max_tokens=200,
+_consult_reply_queue: asyncio.Queue = asyncio.Queue()
+
+async def _get_consult_patient_reply() -> str:
+    return await _consult_reply_queue.get()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1 + 2: Intake interview + smart routing
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _run_intake_phase(
+    initial_complaint: str,
+    text_mode: bool,
+    loop: asyncio.AbstractEventLoop,
+) -> dict:
+    """Run nurse interview then return structured complaint + routing."""
+
+    intake_turn_signal: asyncio.Queue = asyncio.Queue()
+
+    def on_intake_turn(turn_info: dict):
+        # Pass the full turn to the async loop — do NOT call tts here
+        # (calling tts.speak from a sync callback inside the event loop
+        #  causes pyttsx3 on Windows to queue audio but not play it)
+        intake_turn_signal.put_nowait(turn_info)
+
+    nurse_task = asyncio.create_task(
+        run_intake_interview(
+            initial_complaint=initial_complaint,
+            on_token=None,
+            on_turn_complete=on_intake_turn,
+            voice_mode=True,
         )
-        raw = resp.choices[0].message.content.strip()
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        if start != -1 and end > start:
-            return json.loads(raw[start:end])
-    except Exception as exc:
-        display.error("TRIAGE", str(exc))
-    return {"specialists": ["General Medicine"], "urgency": "medium", "symptoms": []}
+    )
+
+    async def nurse_reply_loop():
+        while not nurse_task.done():
+            try:
+                turn_info = await asyncio.wait_for(intake_turn_signal.get(), timeout=90.0)
+            except asyncio.TimeoutError:
+                break
+
+            response_text = turn_info.get("response", "")
+            is_json = response_text.lstrip().startswith("{")
+
+            if response_text and not is_json:
+                # Display question in terminal
+                display.nurse_question(response_text)
+                # Speak via TTS — called from async context for reliable pyttsx3 behaviour
+                tts.speak(response_text)
+                await loop.run_in_executor(None, tts.wait_until_done)
+
+            # If this was the final JSON summary turn, nurse_task will be done
+            if nurse_task.done():
+                break
+
+            if text_mode:
+                print("\nYour reply: ", end="", flush=True)
+                reply = input().strip()
+            else:
+                # Flush mic buffer so TTS speaker audio isn't transcribed as patient speech
+                await loop.run_in_executor(None, stt.flush_input_buffer)
+                display.patient_listening()
+                reply = await loop.run_in_executor(None, stt.record_until_silence)
+
+            reply = reply or "I am not sure."
+            display.patient_speech(reply)
+            await inject_intake_reply(reply)
+
+    reply_task = asyncio.create_task(nurse_reply_loop())
+
+    try:
+        structured = await nurse_task
+    finally:
+        reply_task.cancel()
+        try:
+            await reply_task
+        except asyncio.CancelledError:
+            pass
+
+    return structured
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Single-specialist voice loop
+# Phase 3: Single-specialist voice consultation with Phase 3 consult bridge
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _run_voice_specialist(
     spec_name: str,
     patient_id: str,
+    patient: dict,
     session_id: str,
     complaint: str,
-    text_mode: bool = False,
+    text_mode: bool,
+    loop: asyncio.AbstractEventLoop,
 ) -> dict:
     """
-    Run one specialist consultation in voice mode.
-
-    Bug 2+8 fix: Instead of a fragile per-token JSON heuristic, we use a
-    buffer-then-classify approach. Tokens are always buffered. When the
-    turn completes (on_turn_done fires), we check the FULL response:
-      - If it starts with '{' (after stripping whitespace) → JSON assessment,
-        do NOT speak it via TTS.
-      - Otherwise → conversational text, speak the buffered sentences.
-    
-    During streaming, tokens are tentatively streamed to TTS. If we detect
-    a '{' appearing in the accumulator, we stop streaming further tokens
-    to TTS for the rest of that turn.
+    Multi-turn specialist consultation with live cross-specialist consult detection.
     """
-    loop        = asyncio.get_event_loop()
     turn_signal: asyncio.Queue = asyncio.Queue()
-
-    # ── Buffer-then-classify state ────────────────────────────────────────────
-    response_buffer = []       # list of token strings for current turn
-    json_detected   = False    # once True, no more tokens go to TTS this turn
+    response_buffer = []
+    json_detected   = False
+    consults_done: set[str] = set()
 
     def on_token(token: str):
         nonlocal json_detected
         response_buffer.append(token)
-
-        if json_detected:
-            return  # already detected JSON this turn — suppress all TTS
-
-        # Build what we have so far
         so_far = "".join(response_buffer).lstrip()
         if so_far.startswith("{"):
-            # This turn is a JSON assessment — stop streaming to TTS
             json_detected = True
-            return
-
-        # Safe conversational token — stream to TTS for real-time speech
-        tts.stream_token(token)
+        if not json_detected:
+            tts.stream_token(token)
 
     def on_turn_done(turn_info: dict):
         nonlocal json_detected
-        
-        full_response = "".join(response_buffer).strip()
-        
-        if json_detected:
-            # JSON turn — do NOT flush anything to TTS (it was already suppressed)
-            pass
-        else:
-            # Conversational turn — flush any remaining partial sentence buffer
+        if not json_detected:
             tts.flush_buffer()
-
-        turn_signal.put_nowait(turn_info)
-        display.specialist_turn_done(spec_name, turn_info["turn"])
-        
-        # Reset for next turn
+        turn_signal.put_nowait({**turn_info, "buffer": "".join(response_buffer)})
         response_buffer.clear()
         json_detected = False
 
-    # ── Specialist consultation task ───────────────────────────────────────────
-
     spec_task = asyncio.create_task(
         run_specialist_consultation(
-            spec_name       = spec_name,
-            patient_id      = patient_id,
-            session_id      = f"{session_id}_{spec_name.replace(' ', '_')}",
-            initial_complaint = complaint,
-            on_token        = on_token,
-            on_turn_complete= on_turn_done,
-            voice_mode      = True,
+            spec_name=spec_name,
+            patient_id=patient_id,
+            session_id=f"{session_id}_{spec_name.replace(' ', '_')}",
+            initial_complaint=complaint,
+            on_token=on_token,
+            on_turn_complete=on_turn_done,
+            voice_mode=True,
         )
     )
 
-    # ── Patient reply injector task ────────────────────────────────────────────
-
     async def inject_loop():
         while not spec_task.done():
-            # Wait for specialist to finish a turn (signals via on_turn_done)
             try:
-                await asyncio.wait_for(turn_signal.get(), timeout=120.0)
+                turn_info = await asyncio.wait_for(turn_signal.get(), timeout=120.0)
             except asyncio.TimeoutError:
-                display.error(spec_name, "Turn timeout — ending consultation")
+                display.error(spec_name, "Turn timeout")
                 break
 
-            # Wait for TTS to finish speaking the current turn
             await loop.run_in_executor(None, tts.wait_until_done)
 
-            # If specialist finished (final assessment) while TTS was playing, stop
             if spec_task.done():
                 break
 
-            # Spoken prompt so patient knows when to speak
+            # Phase 3: Check if specialist wants a cross-consult
+            full_text = turn_info.get("buffer", turn_info.get("response", ""))
+            consult_req = await detect_consult_request(full_text)
+            if consult_req and consult_req.get("consult_specialty") not in consults_done:
+                consult_spec = consult_req["consult_specialty"]
+                reason       = consult_req.get("reason", "second opinion requested")
+                consults_done.add(consult_spec)
+
+                display.consult_bridge(spec_name, consult_spec, reason)
+                tts.speak(
+                    f"I would like to bring in our {consult_spec} specialist "
+                    f"for a quick second opinion. They will ask you one question."
+                )
+                await loop.run_in_executor(None, tts.wait_until_done)
+
+                # Run the consult (1-2 turns with patient)
+                async def get_consult_reply():
+                    tts.speak("Please go ahead.")
+                    await loop.run_in_executor(None, tts.wait_until_done)
+                    if text_mode:
+                        print("\nYour reply: ", end="", flush=True)
+                        return input().strip() or "I am not sure."
+                    else:
+                        display.patient_listening()
+                        return await loop.run_in_executor(None, stt.record_until_silence)
+
+                consult_opinion = await run_consult(
+                    consult_specialty=consult_spec,
+                    primary_specialty=spec_name,
+                    patient=patient,
+                    primary_findings=full_text[:500],
+                    on_token=on_token,
+                    voice_mode=True,
+                    get_patient_reply=get_consult_reply,
+                )
+
+                await loop.run_in_executor(None, tts.wait_until_done)
+                display.consult_result(consult_spec, consult_opinion.get("opinion", ""))
+
+                tts.speak(f"Thank you. The {consult_spec} specialist has shared their findings. Let me continue with your assessment.")
+                await loop.run_in_executor(None, tts.wait_until_done)
+
+                # Inject consult opinion + ask primary specialist to finalize
+                opinion_text = consult_opinion.get("opinion", "")
+                extra_meds   = consult_opinion.get("additional_medications", [])
+                extra_tests  = consult_opinion.get("additional_tests", [])
+
+                consult_note = (
+                    f"[CONSULT FROM {consult_spec}: {opinion_text}"
+                    + (f" | Recommended additional medications: {[m.get('name','') for m in extra_meds]}" if extra_meds else "")
+                    + (f" | Recommended additional tests: {extra_tests}" if extra_tests else "")
+                    + "] Please incorporate this into your final assessment now."
+                )
+                await inject_patient_reply(consult_note)
+                continue
+
+            # Normal turn — get patient reply
             tts.speak("Go ahead, I am listening.")
             await loop.run_in_executor(None, tts.wait_until_done)
 
-            # Record patient's spoken reply
             if text_mode:
                 print(f"\n[{spec_name}] Your reply: ", end="", flush=True)
                 reply = input().strip()
             else:
+                # Flush mic buffer so TTS output isn't transcribed as patient speech
+                await loop.run_in_executor(None, stt.flush_input_buffer)
                 display.patient_listening()
                 reply = await loop.run_in_executor(None, stt.record_until_silence)
 
-            reply = reply or "I'm not sure, could you explain more?"
+            reply = reply or "I am not sure, could you explain more?"
             display.patient_speech(reply)
             await inject_patient_reply(reply)
 
@@ -218,20 +271,20 @@ async def _run_voice_specialist(
         except asyncio.CancelledError:
             pass
 
-    # Ensure any leftover TTS is spoken before returning
     tts.flush_buffer()
+
+    # Attach any consults that happened
+    if consults_done:
+        report["consults_requested"] = list(consults_done)
+
     return report
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Report synthesis
+# Phase 4: Rich prescription synthesis
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
-
-
-def _synthesize_reports(reports: list[dict], patient: dict) -> dict:
-    """Merge all specialist reports into one final medical summary."""
+def _synthesize_reports(reports: list[dict], patient: dict, routing: dict) -> dict:
     if not reports:
         return {}
 
@@ -241,6 +294,7 @@ def _synthesize_reports(reports: list[dict], patient: dict) -> dict:
     all_tests: list[str]  = []
     seen_meds:  set[str]  = set()
     seen_tests: set[str]  = set()
+    drug_conflicts: list[str] = []
 
     for r in reports:
         for m in r.get("medications", []):
@@ -248,38 +302,54 @@ def _synthesize_reports(reports: list[dict], patient: dict) -> dict:
             if name and name not in seen_meds:
                 seen_meds.add(name)
                 all_meds.append(m)
+            elif name in seen_meds:
+                drug_conflicts.append(f"{name} prescribed by multiple specialists")
+
+    for r in reports:
         for t in r.get("recommended_tests", []):
             if t and t not in seen_tests:
                 seen_tests.add(t)
                 all_tests.append(t)
 
+    # Prioritize: urgent tests first
+    urgent_keywords = ["ECG", "CT", "MRI", "biopsy", "culture", "troponin", "CBC"]
+    all_tests.sort(key=lambda t: any(kw.lower() in t.lower() for kw in urgent_keywords), reverse=True)
+
     summaries = [r.get("summary", "") for r in reports if r.get("summary")]
-    combined  = " ".join(summaries[:2])
+    combined  = " ".join(summaries)
 
     plain = (
-        f"Based on our specialist assessments, your primary condition is "
+        f"Based on the assessments of our specialist team, your primary condition is "
         f"{lead.get('diagnosis', 'under evaluation')}. "
         + (
-            f"We are prescribing {', '.join(m['name'] for m in all_meds[:3])}. "
+            f"You have been prescribed {', '.join(m['name'] for m in all_meds[:3])}. "
             if all_meds else ""
+        )
+        + (
+            f"Please get the following tests done: {', '.join(all_tests[:3])}. "
+            if all_tests else ""
         )
         + "Please follow your follow-up instructions carefully and rest well."
     )
 
+    follow_up = lead.get("follow_up", "Follow up with your doctor in 7 days.")
+
     return {
-        "patient_id":          patient.get("patient_id", ""),
-        "patient_name":        patient.get("name", ""),
-        "primary_diagnosis":   lead.get("diagnosis", ""),
-        "primary_specialty":   lead.get("specialty", ""),
-        "severity":            lead.get("severity", "medium"),
-        "all_medications":     all_meds,
-        "all_tests":           all_tests,
-        "specialist_count":    len(reports),
-        "specialists_involved":[r.get("specialty", "") for r in reports],
-        "detailed_summary":    combined,
-        "plain_language":      plain,
-        "follow_up":           lead.get("follow_up", ""),
-        "created_at":          datetime.now(timezone.utc).isoformat(),
+        "patient_id":           patient.get("patient_id", ""),
+        "patient_name":         patient.get("name", ""),
+        "primary_diagnosis":    lead.get("diagnosis", ""),
+        "primary_specialty":    lead.get("specialty", ""),
+        "severity":             lead.get("severity", "medium"),
+        "all_medications":      all_meds,
+        "all_tests":            all_tests,
+        "follow_up":            follow_up,
+        "specialist_count":     len(reports),
+        "specialists_involved": [r.get("specialty", "") for r in reports],
+        "drug_conflicts":       drug_conflicts,
+        "routing_reason":       routing.get("routing_reason", ""),
+        "detailed_summary":     combined,
+        "plain_language":       plain,
+        "created_at":           datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -292,181 +362,186 @@ async def run_voice_session(
     text_mode:  bool = False,
     preset_complaint: str = "",
 ) -> dict:
-    """
-    Full patient intake voice session.
-
-    Args:
-        patient_id: MongoDB patient ID (must exist in 'patients' collection)
-        text_mode:  If True, use stdin instead of microphone (for testing)
-
-    Returns:
-        Final medical summary dict saved to MongoDB
-    """
     session_id = str(uuid.uuid4())[:12]
     loop       = asyncio.get_event_loop()
 
-    # ── Startup ────────────────────────────────────────────────────────────────
     if not text_mode:
         stt.load()
     tts.start()
 
     patient = await get_patient(patient_id) or {
         "patient_id": patient_id,
-        "name":       "Patient",
+        "name": "Patient",
     }
-    display.info(f"Starting voice session for {patient.get('name')} ({patient_id})")
+    patient_name = patient.get("name", "Patient")
 
-    # ── Greeting ───────────────────────────────────────────────────────────────
+    display.intake_nurse_header(patient_name)
     tts.speak(
-        f"Welcome to Panacea Hospital. "
-        f"I am your virtual intake coordinator. "
-        f"Please describe your main symptoms and how you are feeling today."
+        f"Welcome to Panacea Hospital, {patient_name}. "
+        f"I am Priya, your intake nurse. "
+        f"Please tell me what brings you in today."
     )
     await loop.run_in_executor(None, tts.wait_until_done)
 
-    # ── Initial complaint ──────────────────────────────────────────────────────
+    # ── Get initial complaint ──────────────────────────────────────────────────
     if preset_complaint:
         complaint = preset_complaint
-        text_mode = True   # preset complaint → text mode for all specialist Q&A too
+        text_mode = True
     elif text_mode:
-        print("\nEnter patient complaint: ", end="", flush=True)
+        print("\nDescribe your symptoms: ", end="", flush=True)
         complaint = input().strip()
     else:
-        tts.speak("Go ahead, I am listening.")
-        await loop.run_in_executor(None, tts.wait_until_done)
         display.patient_listening()
         complaint = await loop.run_in_executor(None, stt.record_until_silence)
 
-    complaint = complaint or "I have a general health concern I would like to discuss."
+    complaint = complaint or "I have a general health concern."
     display.patient_speech(complaint)
 
-    # ── GPT-4o Triage ──────────────────────────────────────────────────────────
-    tts.speak("Thank you. I am connecting you to the right specialists now. One moment please.")
-    routing = await _triage_complaint(complaint)
+    # ── Phase 1: Intake nurse interviews patient ───────────────────────────────
+    display.info("Intake nurse gathering detailed symptom information...")
+    structured = await _run_intake_phase(complaint, text_mode, loop)
+    display.info(
+        f"Intake complete — Chief: {structured.get('chief_complaint', '?')} | "
+        f"Duration: {structured.get('duration', '?')} | "
+        f"Severity: {structured.get('severity', '?')}"
+    )
+
+    # ── Phase 2: Smart routing ─────────────────────────────────────────────────
+    tts.speak("Thank you. I have all the information I need. Let me connect you to the right specialist now.")
+    routing = await route_complaint(structured)
 
     specialists: list[str] = routing.get("specialists", ["General Medicine"])[:3]
     urgency:     str       = routing.get("urgency", "medium")
-    symptoms:    list[str] = routing.get("symptoms", [])
+    reason:      str       = routing.get("routing_reason", "")
 
     display.session_header(
-        patient_id = patient_id,
-        session_id = session_id,
-        urgency    = urgency,
-        symptoms   = symptoms or [complaint[:60]],
+        patient_id=patient_id,
+        session_id=session_id,
+        urgency=urgency,
+        symptoms=[structured.get("chief_complaint", complaint[:60])],
     )
     display.router(specialists, urgency)
+    display.info(f"Routing reason: {reason}")
     await loop.run_in_executor(None, tts.wait_until_done)
 
-    # ── Specialist consultations (sequential — one mic, one speaker) ───────────
+    # ── Phase 3: Specialist consultations ─────────────────────────────────────
     reports: list[dict] = []
 
     for spec_name in specialists:
         display.info(f"Starting {spec_name} consultation...")
-        intro = f"I am now connecting you to our {spec_name} specialist."
-        tts.speak(intro)
+        tts.speak(f"I am now connecting you to our {spec_name} specialist.")
         await loop.run_in_executor(None, tts.wait_until_done)
 
         try:
             report = await _run_voice_specialist(
-                spec_name  = spec_name,
-                patient_id = patient_id,
-                session_id = session_id,
-                complaint  = complaint,
-                text_mode  = text_mode,
+                spec_name=spec_name,
+                patient_id=patient_id,
+                patient=patient,
+                session_id=session_id,
+                complaint=structured.get("chief_complaint", complaint),
+                text_mode=text_mode,
+                loop=loop,
             )
             reports.append(report)
+
             display.diagnosis_summary(
-                specialty    = spec_name,
-                diagnosis    = report.get("diagnosis", ""),
-                severity     = report.get("severity", "medium"),
-                medications  = report.get("medications", []),
-                tests        = report.get("recommended_tests", []),
-                follow_up    = report.get("follow_up", ""),
+                specialty=spec_name,
+                diagnosis=report.get("diagnosis", ""),
+                severity=report.get("severity", "medium"),
+                medications=report.get("medications", []),
+                tests=report.get("recommended_tests", []),
+                follow_up=report.get("follow_up", ""),
             )
-            tts.speak(f"The {spec_name} specialist has concluded their assessment. "
-                      f"Diagnosis: {report.get('diagnosis', 'Inconclusive')}. "
-                      f"{report.get('summary', '')}")
+
+            tts.speak(
+                f"The {spec_name} specialist has completed their assessment. "
+                f"Diagnosis: {report.get('diagnosis', 'Inconclusive')}."
+            )
             await loop.run_in_executor(None, tts.wait_until_done)
+
         except Exception as exc:
             display.error(spec_name, str(exc))
 
     if not reports:
-        display.error("VOICE_PIPELINE", "No specialist reports generated — session aborted.")
+        display.error("VOICE_PIPELINE", "No specialist reports generated.")
         tts.stop()
         return {}
 
-    # ── Synthesis ──────────────────────────────────────────────────────────────
-    summary = _synthesize_reports(reports, patient)
+    # ── Phase 4: Rich prescription synthesis ──────────────────────────────────
+    summary = _synthesize_reports(reports, patient, routing)
+
     display.synthesis(
-        lead_role        = summary.get("primary_specialty", "General Medicine"),
-        specialist_count = summary.get("specialist_count", 0),
-        resource_count   = len(summary.get("all_medications", [])),
+        lead_role=summary.get("primary_specialty", "General Medicine"),
+        specialist_count=summary.get("specialist_count", 0),
+        resource_count=len(summary.get("all_medications", [])),
     )
 
-    # ── MongoDB save (Bug 6 fix: individual try/except per write) ──────────────
-    consultation_saved = False
-    summary_saved = False
-    
+    # Drug conflict warning
+    conflicts = summary.get("drug_conflicts", [])
+    if conflicts:
+        display.error("PRESCRIPTION", f"Drug conflicts detected: {conflicts}")
+
+    # Phase 4: Rich prescription display
+    display.prescription(
+        patient_name=patient_name,
+        primary_diagnosis=summary.get("primary_diagnosis", ""),
+        severity=summary.get("severity", "medium"),
+        all_medications=summary.get("all_medications", []),
+        all_tests=summary.get("all_tests", []),
+        follow_up=summary.get("follow_up", ""),
+        specialists_involved=summary.get("specialists_involved", []),
+        summary=summary.get("detailed_summary", ""),
+        routing_reason=summary.get("routing_reason", ""),
+    )
+
+    # ── Save to MongoDB ────────────────────────────────────────────────────────
     session_doc = {
         "patient_id":           patient_id,
         "session_id":           session_id,
         "urgency":              urgency,
         "initial_complaint":    complaint,
-        "symptoms":             symptoms,
+        "structured_intake":    structured,
+        "routing":              routing,
         "specialists_consulted":specialists,
         "specialist_reports":   reports,
         "final_summary":        summary,
         "created_at":           datetime.now(timezone.utc).isoformat(),
     }
-    
+
     try:
         await save_consultation(session_doc)
-        consultation_saved = True
         display.mongo_save("patient_consultations", patient_id)
     except Exception as exc:
         display.error("MONGO", f"Failed to save consultation: {exc}")
 
     try:
         await save_medical_summary(summary)
-        summary_saved = True
         display.mongo_save("medical_summaries", patient_id)
     except Exception as exc:
-        display.error("MONGO", f"Failed to save medical_summary: {exc}"
-                      + (" (consultation WAS saved)" if consultation_saved else ""))
+        display.error("MONGO", f"Failed to save summary: {exc}")
 
-    # ── Oversight check (Bug 5 fix: threshold > 1 instead of > 2) ─────────────
-    fraud_flags: list[str] = []
-    if len(reports) > 0:
-        # Duplicate medication check (collusion indicator across specialists)
-        med_counts: dict[str, list[str]] = {}
-        for r in reports:
-            for m in r.get("medications", []):
-                n = m.get("name", "")
-                if n:
-                    med_counts.setdefault(n, []).append(r.get("specialty", ""))
-
-        for med, claimants in med_counts.items():
-            if len(claimants) > 1:
-                fraud_flags.append(f"DUPLICATE_PRESCRIPTION: {med} by {claimants}")
+    # ── Oversight fraud check ──────────────────────────────────────────────────
+    fraud_flags: list[str] = list(conflicts)
+    med_counts: dict[str, list[str]] = {}
+    for r in reports:
+        for m in r.get("medications", []):
+            n = m.get("name", "")
+            if n:
+                med_counts.setdefault(n, []).append(r.get("specialty", ""))
+    for med, claimants in med_counts.items():
+        if len(claimants) > 1 and med not in [f.split()[0] for f in fraud_flags]:
+            fraud_flags.append(f"DUPLICATE_PRESCRIPTION: {med} by {claimants}")
 
     oversight_status = "REJECTED" if fraud_flags else "APPROVED"
     reward = -2.0 * len(fraud_flags) + (1.0 if not fraud_flags else 0.0)
     display.oversight_check(oversight_status, fraud_flags)
     display.decision(oversight_status, reward)
 
-    # ── Final report read aloud ────────────────────────────────────────────────
-    display.final_report(
-        patient_name      = patient.get("name", ""),
-        primary_diagnosis = summary.get("primary_diagnosis", ""),
-        all_medications   = summary.get("all_medications", []),
-        all_tests         = summary.get("all_tests", []),
-        summary           = summary.get("detailed_summary", ""),
-    )
-
+    # ── Speak final summary ────────────────────────────────────────────────────
     tts.speak("Here is your medical summary. " + summary.get("plain_language", ""))
     await loop.run_in_executor(None, tts.wait_until_done)
 
-    display.info(f"Session {session_id} complete. Goodbye!")
+    display.info(f"Session {session_id} complete.")
     tts.stop()
     return summary
 
@@ -477,6 +552,7 @@ async def run_voice_session(
 
 if __name__ == "__main__":
     import sys
+
     pid              = "P1001"
     text_mode        = False
     preset_complaint = ""
@@ -495,7 +571,7 @@ if __name__ == "__main__":
         i += 1
 
     asyncio.run(run_voice_session(
-        patient_id       = pid,
-        text_mode        = text_mode,
-        preset_complaint = preset_complaint,
+        patient_id=pid,
+        text_mode=text_mode,
+        preset_complaint=preset_complaint,
     ))

@@ -221,6 +221,74 @@ class PanaceaDisplay:
             box=box.DOUBLE,
         ))
 
+    def intake_nurse_header(self, patient_name: str):
+        console.print()
+        console.print(Panel(
+            f"[bold white]Patient:[/] [yellow]{patient_name}[/]\n"
+            f"[dim]Please describe your symptoms. Priya (intake nurse) will guide you.[/]",
+            title="[bold bright_white] PANACEA — Patient Intake [/]",
+            border_style="bright_cyan",
+            box=box.DOUBLE,
+        ))
+
+    def nurse_question(self, text: str):
+        console.print(
+            f"[{_ts()}] [bold cyan]NURSE (Priya)     [/] {text}"
+        )
+
+    def consult_bridge(self, from_spec: str, to_spec: str, reason: str):
+        console.print(
+            f"[{_ts()}] [{COLORS['inter_agent']}]CONSULT REQUEST   [/] "
+            f"[bold]{from_spec}[/] → [bold cyan]{to_spec}[/]: [dim]{reason}[/]"
+        )
+
+    def consult_result(self, consult_specialty: str, opinion: str):
+        console.print(
+            f"[{_ts()}] [{COLORS['inter_agent']}]CONSULT RESULT    [/] "
+            f"[bold cyan]{consult_specialty}:[/] [italic]{opinion[:100]}[/]"
+        )
+
+    def prescription(
+        self,
+        patient_name: str,
+        primary_diagnosis: str,
+        severity: str,
+        all_medications: list[dict],
+        all_tests: list[str],
+        follow_up: str,
+        specialists_involved: list[str],
+        summary: str,
+        routing_reason: str = "",
+    ):
+        sev_color = "red" if severity == "critical" else "yellow" if severity == "high" else "green"
+
+        meds_lines = []
+        for i, m in enumerate(all_medications, 1):
+            meds_lines.append(
+                f"  {i}. [bold]{m.get('name', '?')}[/] {m.get('dose', '')} "
+                f"— {m.get('frequency', '')} for {m.get('duration', '')}"
+            )
+        meds_text = "\n".join(meds_lines) if meds_lines else "  None prescribed"
+
+        tests_lines = [f"  {i}. {t}" for i, t in enumerate(all_tests, 1)]
+        tests_text = "\n".join(tests_lines) if tests_lines else "  None ordered"
+
+        console.print()
+        console.print(Panel(
+            f"[bold white]Patient:[/]          [yellow]{patient_name}[/]\n"
+            f"[bold white]Primary Diagnosis:[/] [bold {sev_color}]{primary_diagnosis}[/]\n"
+            f"[bold white]Severity:[/]         [{sev_color}]{severity.upper()}[/]\n"
+            f"[bold white]Seen By:[/]          {', '.join(specialists_involved)}\n"
+            + (f"[bold white]Routing Note:[/]     [dim]{routing_reason}[/]\n" if routing_reason else "")
+            + f"\n[bold white]MEDICATIONS:[/]\n{meds_text}\n\n"
+            f"[bold white]TESTS ORDERED:[/]\n{tests_text}\n\n"
+            f"[bold white]FOLLOW-UP:[/]        {follow_up}\n\n"
+            f"[bold white]SUMMARY:[/]          [italic]{summary}[/]",
+            title="[bold bright_white]  PANACEA — FINAL PRESCRIPTION [/]",
+            border_style="bright_green",
+            box=box.DOUBLE,
+        ))
+
     def error(self, source: str, msg: str):
         console.print(
             f"[{_ts()}] [bold red]ERROR [{source}][/] {msg}"

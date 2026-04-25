@@ -9,7 +9,16 @@ OversightObservation: What the agent sees -- the claim + patient context.
 from pydantic import BaseModel, Field
 from typing import Optional
 
-from openenv.core import Observation, Action
+
+class Action(BaseModel):
+    """Base action class."""
+
+
+class Observation(BaseModel):
+    """Base observation class."""
+    done: bool = False
+    reward: Optional[float] = None
+    metadata: dict = Field(default_factory=dict)
 
 
 class OversightAction(Action):

@@ -16,7 +16,6 @@ import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wav
 from dotenv import load_dotenv
-from faster_whisper import WhisperModel
 
 load_dotenv()
 
@@ -39,12 +38,13 @@ class STTEngine:
     """
 
     def __init__(self):
-        self._model: WhisperModel | None = None
+        self._model = None
         self._calibrated_thresh: float | None = None
 
     def load(self):
         """Load Whisper model into memory. Call once at app startup."""
         if self._model is None:
+            from faster_whisper import WhisperModel
             from src.utils.terminal_display import display
             display.info(f"Loading Whisper model '{WHISPER_MODEL}' on {WHISPER_DEVICE}...")
             self._model = WhisperModel(
@@ -121,6 +121,29 @@ class STTEngine:
         text = self.transcribe_file(tmp_path)
         os.unlink(tmp_path)
         return text
+
+    def flush_input_buffer(self, seconds: float = 1.2):
+        """
+        Drain the microphone input buffer after TTS stops.
+        Prevents Whisper from transcribing leftover TTS speaker audio.
+        """
+        import time
+        chunk_samples = int(SAMPLE_RATE * CHUNK_SECS)
+        audio_q: queue.Queue = queue.Queue()
+
+        def callback(indata, frames, time_info, status):
+            audio_q.put(indata.copy())
+
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+            blocksize=chunk_samples, callback=callback,
+        ):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                try:
+                    audio_q.get(timeout=0.1)
+                except queue.Empty:
+                    pass
 
     def record_until_silence(self, prompt: str = "") -> str:
         """
