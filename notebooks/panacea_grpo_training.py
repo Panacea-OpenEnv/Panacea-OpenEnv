@@ -404,7 +404,7 @@ def train(model, tokenizer, dataset):
         bf16                        = torch.cuda.is_bf16_supported(),
         logging_steps               = 10,
         save_strategy               = "epoch",
-        evaluation_strategy         = "epoch",
+        eval_strategy               = "epoch",
         report_to                   = "none",
         # GRPO-specific
         num_generations             = 4,        # responses per prompt compared within group
