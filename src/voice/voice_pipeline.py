@@ -105,31 +105,59 @@ async def _run_voice_specialist(
     """
     Run one specialist consultation in voice mode.
 
-    Architecture:
-      - specialist_task: runs GPT-4o consultation, streams tokens to TTS,
-        then awaits patient reply via _patient_reply_queue
-      - inject_task: after each specialist turn, waits for TTS to finish,
-        records patient speech (or stdin), injects text into the reply queue
-
-    The two tasks communicate via:
-      - turn_signal (asyncio.Queue): specialist signals "I finished speaking"
-      - inject_patient_reply(): voice pipeline pushes patient text into
-        specialist_gpt._patient_reply_queue
+    Bug 2+8 fix: Instead of a fragile per-token JSON heuristic, we use a
+    buffer-then-classify approach. Tokens are always buffered. When the
+    turn completes (on_turn_done fires), we check the FULL response:
+      - If it starts with '{' (after stripping whitespace) → JSON assessment,
+        do NOT speak it via TTS.
+      - Otherwise → conversational text, speak the buffered sentences.
+    
+    During streaming, tokens are tentatively streamed to TTS. If we detect
+    a '{' appearing in the accumulator, we stop streaming further tokens
+    to TTS for the rest of that turn.
     """
     loop        = asyncio.get_event_loop()
     turn_signal: asyncio.Queue = asyncio.Queue()
 
-    # ── Callbacks passed into specialist_gpt ──────────────────────────────────
+    # ── Buffer-then-classify state ────────────────────────────────────────────
+    response_buffer = []       # list of token strings for current turn
+    json_detected   = False    # once True, no more tokens go to TTS this turn
 
     def on_token(token: str):
+        nonlocal json_detected
+        response_buffer.append(token)
+
+        if json_detected:
+            return  # already detected JSON this turn — suppress all TTS
+
+        # Build what we have so far
+        so_far = "".join(response_buffer).lstrip()
+        if so_far.startswith("{"):
+            # This turn is a JSON assessment — stop streaming to TTS
+            json_detected = True
+            return
+
+        # Safe conversational token — stream to TTS for real-time speech
         tts.stream_token(token)
 
     def on_turn_done(turn_info: dict):
-        # Called synchronously from within the specialist coroutine after
-        # each GPT-4o response, right before _wait_for_patient_reply().
-        # put_nowait is safe here because we're still in the event loop.
+        nonlocal json_detected
+        
+        full_response = "".join(response_buffer).strip()
+        
+        if json_detected:
+            # JSON turn — do NOT flush anything to TTS (it was already suppressed)
+            pass
+        else:
+            # Conversational turn — flush any remaining partial sentence buffer
+            tts.flush_buffer()
+
         turn_signal.put_nowait(turn_info)
         display.specialist_turn_done(spec_name, turn_info["turn"])
+        
+        # Reset for next turn
+        response_buffer.clear()
+        json_detected = False
 
     # ── Specialist consultation task ───────────────────────────────────────────
 
@@ -156,13 +184,16 @@ async def _run_voice_specialist(
                 display.error(spec_name, "Turn timeout — ending consultation")
                 break
 
-            # Flush partial sentence buffer, wait for TTS to finish speaking
-            tts.flush_buffer()
+            # Wait for TTS to finish speaking the current turn
             await loop.run_in_executor(None, tts.wait_until_done)
 
             # If specialist finished (final assessment) while TTS was playing, stop
             if spec_task.done():
                 break
+
+            # Spoken prompt so patient knows when to speak
+            tts.speak("Go ahead, I am listening.")
+            await loop.run_in_executor(None, tts.wait_until_done)
 
             # Record patient's spoken reply
             if text_mode:
@@ -301,6 +332,8 @@ async def run_voice_session(
         print("\nEnter patient complaint: ", end="", flush=True)
         complaint = input().strip()
     else:
+        tts.speak("Go ahead, I am listening.")
+        await loop.run_in_executor(None, tts.wait_until_done)
         display.patient_listening()
         complaint = await loop.run_in_executor(None, stt.record_until_silence)
 
@@ -350,6 +383,10 @@ async def run_voice_session(
                 tests        = report.get("recommended_tests", []),
                 follow_up    = report.get("follow_up", ""),
             )
+            tts.speak(f"The {spec_name} specialist has concluded their assessment. "
+                      f"Diagnosis: {report.get('diagnosis', 'Inconclusive')}. "
+                      f"{report.get('summary', '')}")
+            await loop.run_in_executor(None, tts.wait_until_done)
         except Exception as exc:
             display.error(spec_name, str(exc))
 
@@ -366,7 +403,10 @@ async def run_voice_session(
         resource_count   = len(summary.get("all_medications", [])),
     )
 
-    # ── MongoDB save ───────────────────────────────────────────────────────────
+    # ── MongoDB save (Bug 6 fix: individual try/except per write) ──────────────
+    consultation_saved = False
+    summary_saved = False
+    
     session_doc = {
         "patient_id":           patient_id,
         "session_id":           session_id,
@@ -378,16 +418,23 @@ async def run_voice_session(
         "final_summary":        summary,
         "created_at":           datetime.now(timezone.utc).isoformat(),
     }
+    
     try:
         await save_consultation(session_doc)
+        consultation_saved = True
         display.mongo_save("patient_consultations", patient_id)
+    except Exception as exc:
+        display.error("MONGO", f"Failed to save consultation: {exc}")
 
+    try:
         await save_medical_summary(summary)
+        summary_saved = True
         display.mongo_save("medical_summaries", patient_id)
     except Exception as exc:
-        display.error("MONGO", str(exc))
+        display.error("MONGO", f"Failed to save medical_summary: {exc}"
+                      + (" (consultation WAS saved)" if consultation_saved else ""))
 
-    # ── Oversight check (calls hospital oversight logic) ──────────────────────
+    # ── Oversight check (Bug 5 fix: threshold > 1 instead of > 2) ─────────────
     fraud_flags: list[str] = []
     if len(reports) > 0:
         # Duplicate medication check (collusion indicator across specialists)
@@ -399,7 +446,7 @@ async def run_voice_session(
                     med_counts.setdefault(n, []).append(r.get("specialty", ""))
 
         for med, claimants in med_counts.items():
-            if len(claimants) > 2:
+            if len(claimants) > 1:
                 fraud_flags.append(f"DUPLICATE_PRESCRIPTION: {med} by {claimants}")
 
     oversight_status = "REJECTED" if fraud_flags else "APPROVED"

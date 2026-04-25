@@ -1,0 +1,56 @@
+Voice Pipeline Bug Fix Plan
+I audited the entire chain: STT → Triage → Specialist GPT → TTS → MongoDB → Oversight. Here are all the bugs I found and the fixes.
+
+Root Cause Analysis
+The core problem — "not identifying symptoms properly" and falling into a dead "I'm not sure, could you explain more?" loop — is caused by three interconnected bugs:
+
+Bug 1: STT returns empty string → Whisper base model is too small
+The base Whisper model (74M params) has poor accuracy on noisy or accented speech. When it can't confidently transcribe, it returns "". Line 184 of voice_pipeline.py then replaces empty speech with the fallback "I'm not sure, could you explain more?", which gives GPT-4o nothing useful to work with.
+
+IMPORTANT
+
+Fix: Upgrade the Whisper model from base to small in .env. The small model (244M params) is dramatically more accurate on real speech while still running on CPU in ~2 seconds.
+
+Bug 2: JSON detection in on_token is fragile and breaks mid-conversation
+In voice_pipeline.py line 128, the JSON filter checks if not response_so_far and token.strip() == "{". But GPT-4o often starts a conversational turn with whitespace or a newline before the {, which means response_so_far is already non-empty when { arrives. The filter fails, and the TTS tries to read raw JSON syntax aloud — resulting in garbled speech or silence.
+
+IMPORTANT
+
+Fix: Rewrite the JSON filter to check for { anywhere in the accumulated response, not just as the very first non-whitespace token.
+
+Bug 3: _extract_assessment is a greedy JSON parser that triggers on false positives
+In specialist_gpt.py line 252-261, the parser does text.find("{") and text.rfind("}"). If the specialist says something like "Your heart rate is 80, which is normal" and GPT-4o wraps any part in curly braces for emphasis, it will try to parse it as JSON, fail silently, and return None — but in some edge cases it could return a partial dict with ready: false that confuses the flow.
+
+IMPORTANT
+
+Fix: Add a minimum-length check and require "ready" key to be present in the parsed JSON before treating it as an assessment.
+
+Additional Issues Found
+Bug 4: TTS _SENTENCE_END regex misses question marks followed by newlines
+The regex (?<=[.!?])\s+ only splits on whitespace after punctuation. But GPT-4o often puts a ? at the end of a line with a \n, and \s in Python regex does match \n — but the streaming token buffer may not have the newline yet, so the question hangs in the buffer unsaid until flush_buffer().
+
+Fix: Also flush the buffer on \n characters in stream_token().
+
+Bug 5: voice_pipeline.py oversight check threshold is too strict
+Line 415: if len(claimants) > 2 means a medication must be prescribed by 3+ specialists to flag as collusion. With only 1-3 specialists per session, this will never trigger.
+
+Fix: Change to > 1 (2+ specialists prescribing the same drug = flag).
+
+Proposed Changes
+[MODIFY] .env
+Change WHISPER_MODEL=base → WHISPER_MODEL=small
+[MODIFY] src/voice/stt.py
+Add a spoken confirmation so the patient knows when the mic is hot and when it stopped
+[MODIFY] src/voice/tts.py
+Fix the sentence buffer to flush on newlines
+[MODIFY] src/voice/voice_pipeline.py
+Rewrite on_token JSON filter to be robust
+Fix oversight collusion threshold from > 2 to > 1
+Add a spoken prompt before each mic recording so the patient knows when to speak
+[MODIFY] src/agents/specialist_gpt.py
+Make _extract_assessment more robust (require "ready" key + minimum length)
+Improve the system prompt to explicitly tell GPT-4o to NEVER include { in conversational text
+Verification Plan
+Run the pipeline in --text mode with a clear complaint like "I have severe chest pain and difficulty breathing" and verify the triage routes to Cardiology + Pulmonology
+Verify specialist produces conversational (non-JSON) responses for turns 1-3 and a clean JSON assessment on the final turn
+Verify the TTS does NOT attempt to read JSON aloud

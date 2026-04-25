@@ -7,6 +7,7 @@ giving near-zero perceived latency.
 
 import os
 import re
+import sys
 import queue
 import threading
 import pyttsx3
@@ -17,7 +18,8 @@ load_dotenv()
 TTS_RATE  = int(os.getenv("TTS_RATE",  "150"))
 TTS_VOICE = os.getenv("TTS_VOICE", "female").lower()
 
-_SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
+# Split on sentence-ending punctuation followed by whitespace, OR on newlines
+_SENTENCE_END = re.compile(r'(?<=[.!?])\s+|\n+')
 
 
 class TTSEngine:
@@ -50,7 +52,7 @@ class TTSEngine:
     def stream_token(self, token: str):
         """
         Called per GPT-4o streaming token.
-        Buffers tokens until a sentence boundary, then speaks immediately.
+        Buffers tokens until a sentence boundary (or newline), then speaks.
         This gives near-zero perceived latency — doctor starts speaking
         before GPT-4o has finished generating the full response.
         """
@@ -110,7 +112,9 @@ class TTSEngine:
                 self._queue.task_done()
             except queue.Empty:
                 continue
-            except Exception:
+            except Exception as e:
+                # Bug 7 fix: log the error instead of silently swallowing
+                print(f"[TTS ERROR] {e}", file=sys.stderr)
                 try:
                     self._queue.task_done()
                 except Exception:

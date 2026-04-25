@@ -82,9 +82,12 @@ YOU TREAT: {conditions}
 YOUR PROTOCOLS: {protocols}
 
 INSTRUCTIONS:
-- Ask focused, relevant questions one at a time (maximum {MAX_TURNS} turns total)
-- Reference the patient's known conditions and vitals in your questions
-- After gathering enough information, output your final assessment as JSON in this exact format:
+- You are a human doctor speaking to a patient. Be warm, conversational, empathetic, and professional.
+- NO MARKDOWN. No **bold**, no *italics*, no bullet points, no numbered lists.
+- NEVER use curly braces {{ or }} in your conversational replies. They are reserved ONLY for your final JSON assessment.
+- Keep your questions short and natural. Ask only ONE thing at a time.
+- While you are still diagnosing, output ONLY plain spoken text. Absolutely no JSON.
+- After asking enough questions (usually 2-4 turns), deliver your final assessment as a SINGLE message containing ONLY this JSON (no text before or after it):
 
 {{
   "diagnosis": "primary diagnosis here",
@@ -98,8 +101,7 @@ INSTRUCTIONS:
   "ready": true
 }}
 
-Until you have enough information, keep asking questions and set "ready": false or omit the JSON entirely.
-Start by greeting the patient and asking your first most important question."""
+Start by warmly greeting the patient and asking your first most important question."""
 
 
 # ── Streaming specialist conversation ─────────────────────────────────────────
@@ -249,12 +251,23 @@ async def inject_patient_reply(text: str):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_assessment(text: str) -> dict | None:
-    """Parse JSON assessment block from GPT-4o response if present."""
+    """Parse JSON assessment block from GPT-4o response if present.
+    
+    Guards against false positives:
+      - JSON substring must be at least 50 chars (a real assessment is long)
+      - Parsed result must be a dict containing the 'ready' key
+    """
     try:
         start = text.find("{")
         end   = text.rfind("}") + 1
-        if start != -1 and end > start:
-            return json.loads(text[start:end])
+        if start == -1 or end <= start:
+            return None
+        json_str = text[start:end]
+        if len(json_str) < 50:
+            return None
+        parsed = json.loads(json_str)
+        if isinstance(parsed, dict) and "ready" in parsed:
+            return parsed
     except (json.JSONDecodeError, ValueError):
         pass
     return None
