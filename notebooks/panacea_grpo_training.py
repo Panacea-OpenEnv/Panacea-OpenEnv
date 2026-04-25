@@ -398,19 +398,19 @@ def train(model, tokenizer, dataset):
     base_kwargs = dict(
         output_dir                  = "panacea_oversight_model",
         num_train_epochs            = 3,
-        per_device_train_batch_size = 2,
-        gradient_accumulation_steps = 8,
+        per_device_train_batch_size = 1,        # reduced: less VRAM per generation step
+        gradient_accumulation_steps = 16,       # keep effective batch = 16
         learning_rate               = 2e-5,
-        warmup_ratio                = 0.05,
+        warmup_steps                = 20,       # warmup_ratio is deprecated, use steps
         lr_scheduler_type           = "cosine",
         optim                       = "adamw_8bit",
         max_grad_norm               = 0.3,
         fp16                        = not torch.cuda.is_bf16_supported(),
         bf16                        = torch.cuda.is_bf16_supported(),
-        logging_steps               = 10,
+        logging_steps               = 5,
         save_strategy               = "epoch",
         report_to                   = "none",
-        num_generations             = 4,
+        num_generations             = 2,        # was 4 — halves generation time per step
         beta                        = 0.04,
     )
 
@@ -421,10 +421,11 @@ def train(model, tokenizer, dataset):
         base_kwargs["evaluation_strategy"] = "epoch"
 
     # max_completion_length vs max_new_tokens (renamed in TRL >=0.12)
+    # 150 tokens is enough for VERDICT + REASONING (~80-120 words)
     if "max_completion_length" in _grpo_params:
-        base_kwargs["max_completion_length"] = 512
+        base_kwargs["max_completion_length"] = 150
     else:
-        base_kwargs["max_new_tokens"] = 512
+        base_kwargs["max_new_tokens"] = 150
 
     # temperature / top_p — not in all GRPOConfig versions
     if "temperature" in _grpo_params:
