@@ -135,7 +135,7 @@ def load_model():
     return model, tokenizer
 
 # Run:
-# model, tokenizer = load_model()
+model, tokenizer = load_model()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -319,7 +319,7 @@ def _print_distribution(split):
 
 # Run ONE of these:
 # dataset = build_dataset_from_jsonl("data/gpt4o_reports.jsonl")  # Recommended
-# dataset = build_dataset_static(n=2000)                          # Fallback
+dataset = build_dataset_static(n=2000)                          # Fallback
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -358,7 +358,7 @@ def make_reward_fns():
     return oversight_reward_fn, format_reward_fn
 
 # Run:
-# oversight_reward_fn, format_reward_fn = make_reward_fns()
+oversight_reward_fn, format_reward_fn = make_reward_fns()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -408,7 +408,7 @@ def train(model, tokenizer, dataset):
     return trainer
 
 # Run:
-# trainer = train(model, tokenizer, dataset)
+trainer = train(model, tokenizer, dataset)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -492,7 +492,7 @@ def evaluate(model, tokenizer, dataset, n_samples: int = 50):
     return results
 
 # Run:
-# results = evaluate(model, tokenizer, dataset)
+results = evaluate(model, tokenizer, dataset)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -578,4 +578,4 @@ def export_and_serve(model, tokenizer, ngrok_token: str = "", hf_repo: str = "")
     # NOTE: do NOT call t.join() — that would block the cell forever.
 
 # Run:
-# export_and_serve(model, tokenizer, ngrok_token="YOUR_NGROK_TOKEN_HERE")
+export_and_serve(model, tokenizer, ngrok_token="")
