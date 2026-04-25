@@ -1,23 +1,36 @@
-# Backend API
+# ── Backend API ───────────────────────────────────────────────────────────────
 fastapi>=0.100.0
 uvicorn>=0.23.0
-asyncpg>=0.28.0
 pydantic>=2.4.0
+python-dotenv>=1.0.0
 
-# Environment Standard
+# ── MongoDB ───────────────────────────────────────────────────────────────────
+motor>=3.3.0           # async MongoDB driver (used by FastAPI + LangGraph nodes)
+pymongo>=4.6.0         # sync MongoDB driver (used by scripts + seed data)
+
+# ── OpenAI (GPT-4o specialist agents) ────────────────────────────────────────
+openai>=1.30.0
+
+# ── Voice Pipeline ────────────────────────────────────────────────────────────
+faster-whisper>=1.0.0  # local STT — free, no API key needed
+pyttsx3>=2.90          # local TTS — free, no API key needed
+sounddevice>=0.4.6     # microphone capture
+scipy>=1.11.0          # audio file I/O (wav)
+
+# ── LangGraph & AI Orchestration ──────────────────────────────────────────────
+langgraph>=0.2.0
+
+# ── Environment Standard ──────────────────────────────────────────────────────
 gymnasium>=0.29.0
 numpy>=1.24.0
 
-# Training & RL Frameworks
+# ── Training & RL (optional — only needed for oversight agent training) ────────
 torch>=2.0.0
 transformers>=4.31.0
 trl>=0.7.0
-unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
 
-# CLI Visualization
+# ── CLI & Dashboard ───────────────────────────────────────────────────────────
 rich>=13.5.0
-
-# Productionization
 streamlit>=1.28.0
 pandas>=2.0.0
-langgraph>=0.0.26
+requests>=2.31.0
