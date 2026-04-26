@@ -70,80 +70,101 @@ The agent doesn't know yet if this is legitimate or fraudulent. It doesn't know 
 
 **Step 4 — Reward.**When the agent submits its verdict, the environment computes a composite reward based on accuracy, evidence quality, and investigation efficiency (see Section 3).
 
-<!-- VISUAL AID #2: Episode walkthrough + Agent decision flow (combined) -->
+#### Diagram A — How the Oversight Model Works (Internal Decision Logic)
+
 ```mermaid
 flowchart TD
-    classDef envNode fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20
     classDef agentNode fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
     classDef toolNode fill:#fff8e1,stroke:#f9a825,stroke-width:2px,color:#e65100
     classDef rewardNode fill:#fce4ec,stroke:#c62828,stroke-width:2px,color:#b71c1c
     classDef decisionNode fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#4a148c
     classDef endNode fill:#eceff1,stroke:#455a64,stroke-width:3px,color:#263238
 
-    %% ── Episode Start ──
-    START(["Episode Start: env.reset()"]):::envNode
-    CLAIM["Env serves claim headline\n─────────────────\nPatient ID: P-4821\nDept: Cardiology\nAmount: $47,200\nSpecialist: Dr. Sharma"]:::envNode
+    INPUT["Receives Claim\n+ Accumulated Evidence"]:::agentNode
+    INPUT --> HYPOTHESIS
 
-    START --> CLAIM
+    HYPOTHESIS["Form Hypothesis\n- Is the patient real?\n- Is the amount plausible?\n- Are reports consistent?\n- Any duplicate prescriptions?"]:::agentNode
 
-    %% ── Agent Reasoning Loop ──
-    CLAIM --> THINK
+    HYPOTHESIS --> CONFIDENCE{{"Confident enough\nto decide?"}}:::decisionNode
 
-    THINK["Agent Analyzes Observation\n─────────────────\nReads claim details\nReviews evidence so far\nChecks step budget remaining\nEstimates deception likelihood"]:::agentNode
+    CONFIDENCE -->|"No"| SELECT_TOOL
+    CONFIDENCE -->|"Yes"| COMPOSE
 
-    THINK --> DECIDE{{"Step N of 8\nChoose Action"}}:::decisionNode
+    SELECT_TOOL["Select Diagnostic Tool\nbased on hypothesis:\n- Ghost suspicion -> REGISTRY\n- Inflation suspicion -> BILLING\n- Masking suspicion -> REPORTS\n- Collusion suspicion -> DRUGS"]:::agentNode
 
-    %% ── Branch 1: Tool Call ──
-    DECIDE -->|"tool_call\n(investigate)"| PICK_TOOL
+    SELECT_TOOL --> INTERPRET
 
-    PICK_TOOL["Agent Selects Tool\n─────────────────\nWhich tool exposes this\ntype of deception\nIs the cost worth it"]:::agentNode
+    INTERPRET["Interpret Tool Response\n- Parse evidence flags\n- Update hypothesis\n- Weigh cost vs. information gained"]:::agentNode
 
-    PICK_TOOL --> TOOL_EXEC
+    INTERPRET --> BUDGET{{"Steps remaining?"}}:::decisionNode
+    BUDGET -->|"Yes"| HYPOTHESIS
+    BUDGET -->|"No"| COMPOSE
 
-    subgraph ToolInteraction["Enterprise API Call"]
-        direction TB
-        TOOL_EXEC{{"Tool Reliable\n(85-99% chance)"}}:::toolNode
-        TOOL_OK["Tool Returns Evidence\n─────────────────\ne.g. REGISTRY: NO RECORD\ne.g. BILLING: RATIO=3.2x"]:::toolNode
-        TOOL_FAIL["[TOOL UNAVAILABLE]\nAPI timeout — no data"]:::toolNode
-        TOOL_EXEC -->|"Yes"| TOOL_OK
-        TOOL_EXEC -->|"No"| TOOL_FAIL
+    COMPOSE["Compose Verdict\n- Synthesize all evidence\n- Cite specific tool outputs\n- Write structured reasoning"]:::agentNode
+
+    COMPOSE --> OUTPUT
+
+    subgraph OUTPUT["Model Output"]
+        direction LR
+        VERDICT_OUT["VERDICT:\nAPPROVED or REJECTED"]:::agentNode
+        REASON_OUT["REASONING:\nEvidence-grounded\njustification"]:::agentNode
     end
 
-    TOOL_OK --> COST["Step Cost Applied\n(-0.10 to -0.25 reward)"]:::rewardNode
-    TOOL_FAIL --> COST
+    OUTPUT --> SCORE
 
-    COST --> BUDGET{{"Steps < 8"}}:::decisionNode
-    BUDGET -->|"Yes — keep investigating\nor submit verdict"| THINK
-    BUDGET -->|"No — forced to decide"| FORCED["Agent must submit\nverdict now"]:::agentNode
-    FORCED --> VERDICT
-
-    %% ── Branch 2: Verdict ──
-    DECIDE -->|"verdict\n(decide)"| VERDICT
-
-    VERDICT["Agent Submits Verdict\n─────────────────\nVerdict: APPROVED or REJECTED\nReasoning: cites evidence\nfrom tool outputs"]:::agentNode
-
-    VERDICT --> REWARD
-
-    %% ── Reward Computation ──
-    subgraph RewardCalc["Reward Computation"]
+    subgraph SCORE["Reward Signal (used during training)"]
         direction TB
-        REWARD{{"Was verdict correct"}}:::rewardNode
-        R_TP["+2.0 Caught Fraud\n(+ 0.5 evidence bonus\nif right tool cited)"]:::rewardNode
-        R_TN["+1.0 Approved Clean Claim"]:::rewardNode
-        R_FN["-3.0 Missed Fraud\n(worst outcome)"]:::rewardNode
-        R_FP["-2.0 Wrongly Rejected\nClean Claim"]:::rewardNode
-        REWARD -->|"Rejected + was fraud"| R_TP
-        REWARD -->|"Approved + was clean"| R_TN
-        REWARD -->|"Approved + was fraud"| R_FN
-        REWARD -->|"Rejected + was clean"| R_FP
+        CHECK{{"Correct?"}}:::rewardNode
+        TP["+2.0 Caught fraud\n+0.5 evidence bonus"]:::rewardNode
+        TN["+1.0 Approved clean"]:::rewardNode
+        FN["-3.0 Missed fraud"]:::rewardNode
+        FP["-2.0 False accusation"]:::rewardNode
+        CHECK -->|"Rejected fraud"| TP
+        CHECK -->|"Approved clean"| TN
+        CHECK -->|"Approved fraud"| FN
+        CHECK -->|"Rejected clean"| FP
+    end
+```
+
+#### Diagram B — User Interaction Workflow (OpenEnv API)
+
+```mermaid
+sequenceDiagram
+    participant User as User / Training Script
+    participant Client as PanaceaEnv Client
+    participant Server as HF Space Server
+    participant Env as PanaceaEnvironment
+    participant Tools as Enterprise Tool Backends
+
+    User->>Client: env = PanaceaEnv(url)
+    User->>Client: obs = env.reset()
+    Client->>Server: POST /reset
+    Server->>Env: reset()
+    Env-->>Server: Generate claim scenario
+    Server-->>Client: OversightObservation
+    Client-->>User: obs.observation.prompt
+
+    Note over User: Read claim headline:<br/>Patient P-4821, Cardiology, $47,200
+
+    loop Steps 1-8 (until verdict or budget exhausted)
+        User->>Client: env.call_tool("TOOL_REGISTRY")
+        Client->>Server: POST /step {action: tool_call}
+        Server->>Env: step(action)
+        Env->>Tools: Query Registry Backend
+        Tools-->>Env: "NO RECORD FOUND" (or UNAVAILABLE)
+        Env-->>Server: Updated observation + tool output
+        Server-->>Client: OversightObservation
+        Client-->>User: Evidence appended to context
     end
 
-    R_TP --> DONE
-    R_TN --> DONE
-    R_FN --> DONE
-    R_FP --> DONE
-
-    DONE(["Episode Complete\n─────────────────\nTotal Reward = verdict reward\n+ evidence bonuses\n- tool call costs\n- step penalties"]):::endNode
+    User->>Client: env.submit_verdict("REJECTED",<br/>reasoning="Registry: NO RECORD")
+    Client->>Server: POST /step {action: verdict}
+    Server->>Env: step(action)
+    Env-->>Server: Compute reward, done=True
+    Server-->>Client: reward, done, info
+    Client-->>User: result.reward = +2.35
+    
+    Note over User: Reward breakdown:<br/>+2.0 (caught fraud)<br/>+0.5 (evidence bonus)<br/>-0.15 (tool cost)
 ```
 
 ### 2.2 The Five Deception Types
