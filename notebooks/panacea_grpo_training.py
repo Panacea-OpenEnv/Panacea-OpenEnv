@@ -54,8 +54,9 @@ _TOOL_TAG_RE = re.compile(r"<tool>\s*(TOOL_[A-Z_]+)\s*</tool>", re.IGNORECASE)
 
 
 def extract_verdict_and_reasoning(text: str) -> tuple[str, str]:
-    """Parse VERDICT and REASONING from model output."""
-    verdict = "REJECTED"
+    """Parse VERDICT and REASONING. Returns ('', '') if no verdict tag —
+    the reward function treats that as a malformed completion (penalty)."""
+    verdict = ""
     reasoning = ""
     m = re.search(r"VERDICT:\s*(APPROVED|REJECTED)", text, re.IGNORECASE)
     if m:
@@ -370,7 +371,24 @@ def sft_warmup(model, tokenizer, dataset, steps: int = 50):
     return model
 
 # Run:
-model = sft_warmup(model, tokenizer, dataset, steps=50)
+model = sft_warmup(model, tokenizer, dataset, steps=200)
+
+
+def sft_sanity_check(model, tokenizer, dataset, n: int = 3):
+    """Generate a few samples post-SFT. If completions don't contain VERDICT,
+    the warm-up failed and GRPO will not learn — abort early."""
+    print("\n=== SFT sanity check ===")
+    sample = dataset["train"].select(range(n))
+    ok = 0
+    for i in range(n):
+        out = run_inference(model, tokenizer, sample[i]["prompt"])
+        has_verdict = bool(re.search(r"VERDICT:\s*(APPROVED|REJECTED)", out, re.IGNORECASE))
+        has_tool    = bool(_TOOL_TAG_RE.search(out))
+        print(f"  sample {i}: verdict={has_verdict} tool={has_tool} | preview: {out[:120]!r}")
+        if has_verdict: ok += 1
+    print(f"=== {ok}/{n} samples emit VERDICT — proceed if ok>=2, otherwise re-run SFT ===\n")
+
+sft_sanity_check(model, tokenizer, dataset)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -392,8 +410,9 @@ def train(model, tokenizer, dataset):
         per_device_train_batch_size = batch_size,
         gradient_accumulation_steps = grad_accum,
         learning_rate               = 5e-6,
-        num_generations             = 2,
-        max_completion_length       = 384,    # trajectories average ~250 tokens
+        num_generations             = 4,      # need >=2 with variance; 4 is the GRPO sweet spot
+        temperature                 = 0.9,    # without sampling temp, all generations are identical → zero advantage
+        max_completion_length       = 320,    # expert trajectories avg ~250; 320 leaves headroom for EOS
         max_prompt_length           = 1024,
         logging_steps               = 1,
         save_steps                  = 200,
