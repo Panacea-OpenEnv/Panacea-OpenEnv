@@ -369,62 +369,11 @@ tool_trace_reward_fn, format_reward_fn, tool_use_reward_fn = make_reward_fns()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CELL 6 — SFT warm-up (teach the <tool>X</tool> format)
+# CELL 6 — Inference + evaluation helpers
 # ══════════════════════════════════════════════════════════════════════════════
-# 50 SFT steps before GRPO so the model can already emit a structured trajectory.
-# Without this warm-up, GRPO often spends 200+ steps just discovering the format.
-
-def sft_warmup(model, tokenizer, dataset, steps: int = 50):
-    from trl import SFTTrainer, SFTConfig
-    from datasets import Dataset
-
-    # Build conversation-style examples
-    rows = []
-    for ex in dataset["train"]:
-        if not ex["response"]:
-            continue
-        rows.append({
-            "messages": [
-                {"role": "system",    "content": SYSTEM_PROMPT},
-                {"role": "user",      "content": ex["prompt"]},
-                {"role": "assistant", "content": ex["response"]},
-            ]
-        })
-    sft_ds = Dataset.from_list(rows)
-
-    args = SFTConfig(
-        output_dir                  = "./panacea_sft_warmup",
-        num_train_epochs            = 1,
-        max_steps                   = steps,
-        per_device_train_batch_size = 2,
-        gradient_accumulation_steps = 2,
-        learning_rate               = 2e-5,
-        logging_steps               = 5,
-        save_strategy               = "no",
-        seed                        = 42,
-        report_to                   = "none",
-        max_seq_length              = 1536,
-    )
-    def _formatting_func(examples):
-        msgs = examples["messages"]
-        if isinstance(msgs, list) and msgs and isinstance(msgs[0], dict):
-            return [tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)]
-        return [tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=False) for m in msgs]
-
-    trainer = SFTTrainer(
-        model            = model,
-        processing_class = tokenizer,
-        args             = args,
-        train_dataset    = sft_ds,
-        formatting_func  = _formatting_func,
-    )
-    print(f"SFT warm-up: {steps} steps on {len(sft_ds)} samples...")
-    trainer.train()
-    print("SFT warm-up complete.")
-    return model
 
 def run_inference(model, tokenizer, prompt: str) -> str:
-    """Run the trained model on a single prompt string."""
+    """Run the model on a single prompt string."""
     import torch
     from unsloth import FastLanguageModel
     FastLanguageModel.for_inference(model)
@@ -498,53 +447,6 @@ def evaluate(model, tokenizer, dataset, n_samples: int = 50):
     return summary, tools_per_type
 
 
-# ── Baseline eval BEFORE any training — gives us a number to beat ──────────
-print("\n=== BASELINE — untrained Qwen2.5-1.5B (50 test samples) ===")
-baseline_summary, baseline_tools = evaluate(model, tokenizer, dataset, n_samples=50)
-
-
-# Run SFT warm-up:
-model = sft_warmup(model, tokenizer, dataset, steps=50)
-
-
-def sft_sanity_check(model, tokenizer, dataset, n: int = 3):
-    """Generate a few samples post-SFT. If completions don't contain VERDICT,
-    the warm-up failed and GRPO will not learn — abort early.
-    Self-contained inference (run_inference is defined later in CELL 8)."""
-    import torch
-    from unsloth import FastLanguageModel
-    FastLanguageModel.for_inference(model)
-
-    print("\n=== SFT sanity check ===")
-    sample = dataset["train"].select(range(n))
-    ok = 0
-    for i in range(n):
-        messages = [{"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user",   "content": sample[i]["prompt"]}]
-        text   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(text, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens = 320,
-                temperature    = 0.2,
-                top_p          = 0.9,
-                do_sample      = True,
-                pad_token_id   = tokenizer.eos_token_id,
-            )
-        new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-        out = tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-        has_verdict = bool(re.search(r"VERDICT:\s*(APPROVED|REJECTED)", out, re.IGNORECASE))
-        has_tool    = bool(_TOOL_TAG_RE.search(out))
-        print(f"  sample {i}: verdict={has_verdict} tool={has_tool} | preview: {out[:120]!r}")
-        if has_verdict:
-            ok += 1
-    print(f"=== {ok}/{n} samples emit VERDICT — proceed if ok>=2, otherwise re-run SFT ===\n")
-
-sft_sanity_check(model, tokenizer, dataset)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # CELL 7 — GRPO training on POMDP trajectories
 # ══════════════════════════════════════════════════════════════════════════════
@@ -554,10 +456,12 @@ def train(model, tokenizer, dataset):
 
     tool_trace_reward_fn, format_reward_fn, tool_use_reward_fn = make_reward_fns()
 
+    # T4 timing: ~18-20 s/step with batch=2, gen=6, max_completion=256
+    # 300 steps * ~19 s ≈ 95 min  →  fits comfortably in a 1.5-hour session
     batch_size = 2
     grad_accum = 2
     num_epochs = 1
-    max_grpo_steps = 150  # short, iterable run; reward + loss curves are visible by ~50 steps
+    max_grpo_steps = 300
 
     args = GRPOConfig(
         output_dir                  = "./panacea_grpo_out",
@@ -566,9 +470,9 @@ def train(model, tokenizer, dataset):
         per_device_train_batch_size = batch_size,
         gradient_accumulation_steps = grad_accum,
         learning_rate               = 5e-6,
-        num_generations             = 4,      # need >=2 with variance; 4 is the GRPO sweet spot
-        temperature                 = 0.9,    # without sampling temp, all generations are identical → zero advantage
-        max_completion_length       = 320,    # expert trajectories avg ~250; 320 leaves headroom for EOS
+        num_generations             = 6,      # more diversity → richer advantage signal; still fits T4 VRAM
+        temperature                 = 0.9,    # sampling diversity required for non-zero advantage
+        max_completion_length       = 256,    # trim from 320 → saves ~15% VRAM, keeps most trajectories intact
         max_prompt_length           = 1024,
         logging_steps               = 1,
         save_steps                  = 200,
