@@ -207,6 +207,55 @@ model, tokenizer = load_model()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CELL 3.5 — Baseline eval BEFORE training (snapshot the untrained model)
+# ══════════════════════════════════════════════════════════════════════════════
+# We need the dataset loaded first, so this actually runs after CELL 4.
+# It saves baseline_eval.json which the after-training comparison will read.
+
+def evaluate_per_type(model, tokenizer, dataset, n_per_type: int = 20, tag: str = "baseline"):
+    """Per-deception-type accuracy + mean reward. Returns a dict that
+    plot_before_after() consumes. Saves to {tag}_eval.json."""
+    test = dataset["test"]
+    by_type: dict[str, list[int]] = {}
+    rewards_by_type: dict[str, list[float]] = {}
+    tools_by_type: dict[str, Counter] = {}
+
+    for ex in test:
+        dtype = ex["deception_type"]
+        by_type.setdefault(dtype, [])
+        rewards_by_type.setdefault(dtype, [])
+        tools_by_type.setdefault(dtype, Counter())
+        if len(by_type[dtype]) >= n_per_type:
+            continue
+
+        response = run_inference(model, tokenizer, ex["prompt"])
+        verdict  = parse_verdict(response)
+        correct  = (verdict is not None) and (verdict == ex["expected_verdict"])
+        by_type[dtype].append(1 if correct else 0)
+
+        acc_r  = compute_accuracy_reward(verdict or "", ex["expected_verdict"], dtype, response)
+        cost_r = replay_tool_costs(response)
+        rewards_by_type[dtype].append(acc_r + cost_r)
+        tools_by_type[dtype].update(extract_tools_called(response))
+
+    summary = {
+        "tag": tag,
+        "accuracy_per_type":     {k: (sum(v)/len(v) if v else 0.0) for k, v in by_type.items()},
+        "mean_reward_per_type":  {k: (sum(v)/len(v) if v else 0.0) for k, v in rewards_by_type.items()},
+        "n_per_type":            {k: len(v) for k, v in by_type.items()},
+        "tool_calls_per_type":   {k: dict(v) for k, v in tools_by_type.items()},
+    }
+    out_path = f"./panacea_grpo_out/{tag}_eval.json"
+    os.makedirs("./panacea_grpo_out", exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"\n[{tag}] per-type accuracy: " +
+          ", ".join(f"{k}={v*100:.0f}%" for k, v in summary['accuracy_per_type'].items()))
+    print(f"[{tag}] saved -> {out_path}")
+    return summary
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CELL 4 — Load POMDP trajectory dataset
 # ══════════════════════════════════════════════════════════════════════════════
 # Expects data/pomdp_trajectories.jsonl produced by:
@@ -255,6 +304,10 @@ def _print_distribution(split):
 
 # Run:
 dataset = build_dataset_from_jsonl("data/pomdp_trajectories.jsonl")
+
+# Baseline eval — snapshot the UNTRAINED model so we can show before/after
+# (run_inference is defined later in CELL 8 but Python only resolves it at call time)
+baseline_summary = evaluate_per_type(model, tokenizer, dataset, n_per_type=10, tag="baseline")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -376,16 +429,37 @@ model = sft_warmup(model, tokenizer, dataset, steps=200)
 
 def sft_sanity_check(model, tokenizer, dataset, n: int = 3):
     """Generate a few samples post-SFT. If completions don't contain VERDICT,
-    the warm-up failed and GRPO will not learn — abort early."""
+    the warm-up failed and GRPO will not learn — abort early.
+    Self-contained inference (run_inference is defined later in CELL 8)."""
+    import torch
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+
     print("\n=== SFT sanity check ===")
     sample = dataset["train"].select(range(n))
     ok = 0
     for i in range(n):
-        out = run_inference(model, tokenizer, sample[i]["prompt"])
+        messages = [{"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": sample[i]["prompt"]}]
+        text   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = tokenizer(text, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens = 320,
+                temperature    = 0.2,
+                top_p          = 0.9,
+                do_sample      = True,
+                pad_token_id   = tokenizer.eos_token_id,
+            )
+        new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+        out = tokenizer.decode(new_tokens, skip_special_tokens=True)
+
         has_verdict = bool(re.search(r"VERDICT:\s*(APPROVED|REJECTED)", out, re.IGNORECASE))
         has_tool    = bool(_TOOL_TAG_RE.search(out))
         print(f"  sample {i}: verdict={has_verdict} tool={has_tool} | preview: {out[:120]!r}")
-        if has_verdict: ok += 1
+        if has_verdict:
+            ok += 1
     print(f"=== {ok}/{n} samples emit VERDICT — proceed if ok>=2, otherwise re-run SFT ===\n")
 
 sft_sanity_check(model, tokenizer, dataset)
@@ -621,8 +695,69 @@ def plot_curriculum_drift(log_path: str = "data/curriculum_log.jsonl"):
     print("Saved chart -> curriculum_drift.png")
 
 
+def plot_before_after(out_dir: str = "./panacea_grpo_out"):
+    """Render the chart that wins judges:
+    side-by-side per-deception-type accuracy + mean reward, baseline vs trained.
+    Reads baseline_eval.json and trained_eval.json saved by evaluate_per_type()."""
+    import matplotlib.pyplot as plt
+
+    base_path    = os.path.join(out_dir, "baseline_eval.json")
+    trained_path = os.path.join(out_dir, "trained_eval.json")
+    if not (os.path.exists(base_path) and os.path.exists(trained_path)):
+        print(f"Missing eval JSONs in {out_dir}. Run baseline + trained eval first.")
+        return
+
+    with open(base_path) as f:    base = json.load(f)
+    with open(trained_path) as f: trained = json.load(f)
+
+    types = sorted(set(base["accuracy_per_type"]) | set(trained["accuracy_per_type"]))
+    base_acc    = [base["accuracy_per_type"].get(t, 0.0) * 100    for t in types]
+    trained_acc = [trained["accuracy_per_type"].get(t, 0.0) * 100 for t in types]
+    base_rwd    = [base["mean_reward_per_type"].get(t, 0.0)       for t in types]
+    trained_rwd = [trained["mean_reward_per_type"].get(t, 0.0)    for t in types]
+
+    x = list(range(len(types)))
+    width = 0.38
+    left  = [i - width/2 for i in x]
+    right = [i + width/2 for i in x]
+    fig, ax = plt.subplots(1, 2, figsize=(13, 5))
+
+    ax[0].bar(left,  base_acc,    width, label="Before training", color="#bbb")
+    ax[0].bar(right, trained_acc, width, label="After training",  color="tab:green")
+    ax[0].set_xticks(x); ax[0].set_xticklabels(types, rotation=15)
+    ax[0].set_ylabel("Accuracy (%)"); ax[0].set_ylim(0, 105)
+    ax[0].set_title("Detection accuracy by deception type")
+    ax[0].legend(); ax[0].grid(axis="y", alpha=0.3)
+    for i, (b, t) in enumerate(zip(base_acc, trained_acc)):
+        ax[0].text(left[i],  b + 1, f"{b:.0f}", ha="center", fontsize=9)
+        ax[0].text(right[i], t + 1, f"{t:.0f}", ha="center", fontsize=9, fontweight="bold")
+
+    ax[1].bar(left,  base_rwd,    width, label="Before training", color="#bbb")
+    ax[1].bar(right, trained_rwd, width, label="After training",  color="tab:blue")
+    ax[1].set_xticks(x); ax[1].set_xticklabels(types, rotation=15)
+    ax[1].set_ylabel("Mean episode reward")
+    ax[1].set_title("Reward by deception type")
+    ax[1].axhline(0, color="black", linewidth=0.6)
+    ax[1].legend(); ax[1].grid(axis="y", alpha=0.3)
+
+    fig.suptitle("Panacea oversight model: before vs after GRPO training", fontsize=13)
+    fig.tight_layout()
+    chart = os.path.join(out_dir, "before_after.png")
+    fig.savefig(chart, dpi=120)
+    plt.show()
+    print(f"Saved chart -> {chart}")
+
+    # Headline summary for the report
+    base_overall    = sum(base_acc)    / len(base_acc)
+    trained_overall = sum(trained_acc) / len(trained_acc)
+    print(f"\nOverall accuracy: {base_overall:.1f}% -> {trained_overall:.1f}% "
+          f"(+{trained_overall - base_overall:.1f} pp)")
+
+
 # Run:
 results, tools_per_type = evaluate(model, tokenizer, dataset)
+trained_summary = evaluate_per_type(model, tokenizer, dataset, n_per_type=10, tag="trained")
+plot_before_after()
 plot_curriculum_drift()
 
 
