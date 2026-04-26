@@ -29,3 +29,4 @@ Thumbs.db
 # IDE
 .vscode/settings.json
 .idea/
+.claude/
