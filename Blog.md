@@ -10,7 +10,7 @@
 
 | Resource | Link |
 |----------|------|
-| **Live Environment**(HF Space) | [anilpaliwal132-panacea.hf.space](https://anilpaliwal132-panacea.hf.space) |
+| **Live Environment**(HF Space) | [anilpaliwal132-panacea.hf.space](https://huggingface.co/spaces/Anilpaliwal132/panacea/tree/main) |
 | **Training Notebook**(Colab) | https://colab.research.google.com/drive/1lSv-wcmtMd8FbsNlAq8uraWKbGp6vIe2?usp=sharing |
 | **GitHub Repository**| [Panacea-OpenEnv](https://github.com/Panacea-OpenEnv/Panacea-OpenEnv.git) |
 

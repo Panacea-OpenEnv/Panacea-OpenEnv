@@ -8,12 +8,9 @@ An [OpenEnv](https://github.com/meta-pytorch/openenv) environment for training L
 
 ##  Submission Links (Minimum Requirements)
 
-- **Live Environment (HF Space)**: [anilpaliwal132-panacea.hf.space](https://anilpaliwal132-panacea.hf.space)
+- **Live Environment (HF Space)**: [anilpaliwal132-panacea.hf.space](https://huggingface.co/spaces/Anilpaliwal132/panacea/tree/main)
 - **Story & Writeup (Blog)**: [Read the deep-dive Blog Post](Blog.md)
-- **Training Script (Colab)**: [GRPO + Unsloth Training Notebook](notebooks/panacea_grpo_training.py) *(TODO: Insert Colab Hosted URL)*
-- **Trained Model**: *(TODO: Insert HF Hub Qwen2.5-1.5B PEFT adapter URL)*
-- **Demo Video**: *(TODO: Insert YouTube link < 2 mins)*
-
+- **Training Script (Colab)**: [GRPO + Unsloth Training Notebook](notebooks/panacea_grpo_training.py)
 ---
 
 ## 1. The Problem & Innovation (Environment Innovation - 40%)
