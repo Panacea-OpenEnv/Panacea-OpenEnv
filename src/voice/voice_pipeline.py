@@ -77,6 +77,10 @@ async def _run_voice_specialist(
         if so_far.startswith("{"):
             json_detected = True
         if not json_detected:
+            if text_mode:
+                # In text mode TTS is silent, so echo tokens to the terminal
+                # so the patient can read the specialist's question.
+                print(token, end="", flush=True)
             tts.stream_token(token)
 
     def on_turn_done(turn_info: dict):
@@ -175,8 +179,9 @@ async def _run_voice_specialist(
                 continue
 
             # Normal turn — get patient reply
-            tts.speak("Go ahead, I am listening.")
-            await loop.run_in_executor(None, tts.wait_until_done)
+            if not text_mode:
+                tts.speak("Go ahead, I am listening.")
+                await loop.run_in_executor(None, tts.wait_until_done)
 
             if text_mode:
                 print(f"\n[{spec_name}] Your reply: ", end="", flush=True)
