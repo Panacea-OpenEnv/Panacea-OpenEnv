@@ -1,3 +1,5 @@
+
+
 """
 Panacea GRPO Training — Google Colab
 =====================================
@@ -171,6 +173,35 @@ def replay_tool_costs(completion: str) -> float:
     return round(total, 4)
 
 
+def run_inference(model, tokenizer, prompt: str) -> str:
+    """Run the model on a single prompt string.
+    Defined here in Cell 2 so every downstream cell/function can reference it
+    regardless of execution order."""
+    import torch
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens = 384,
+            temperature    = 0.2,
+            top_p          = 0.9,
+            do_sample      = True,
+            pad_token_id   = tokenizer.eos_token_id,
+        )
+
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
 print("Cell 2 ready.")
 
 
@@ -204,35 +235,6 @@ def load_model():
 
 # Run:
 model, tokenizer = load_model()
-
-
-# ── Inference helper — defined early so every downstream cell can call it ─────
-
-def run_inference(model, tokenizer, prompt: str) -> str:
-    """Run the model on a single prompt string."""
-    import torch
-    from unsloth import FastLanguageModel
-    FastLanguageModel.for_inference(model)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": prompt},
-    ]
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens = 384,
-            temperature    = 0.2,
-            top_p          = 0.9,
-            do_sample      = True,
-            pad_token_id   = tokenizer.eos_token_id,
-        )
-
-    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
