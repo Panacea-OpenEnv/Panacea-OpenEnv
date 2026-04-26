@@ -423,8 +423,88 @@ def sft_warmup(model, tokenizer, dataset, steps: int = 50):
     print("SFT warm-up complete.")
     return model
 
-# Run:
-model = sft_warmup(model, tokenizer, dataset, steps=200)
+def run_inference(model, tokenizer, prompt: str) -> str:
+    """Run the trained model on a single prompt string."""
+    import torch
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens = 384,
+            temperature    = 0.2,
+            top_p          = 0.9,
+            do_sample      = True,
+            pad_token_id   = tokenizer.eos_token_id,
+        )
+
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
+def evaluate(model, tokenizer, dataset, n_samples: int = 50):
+    test_split = dataset["test"]
+    n = min(n_samples, len(test_split))
+    samples = test_split.select(range(n))
+
+    results      = {"tp": 0, "tn": 0, "fp": 0, "fn": 0, "parse_err": 0}
+    fn_breakdown = Counter()
+    tools_per_type: dict[str, Counter] = {}
+
+    for i in range(n):
+        s        = samples[i]
+        response = run_inference(model, tokenizer, s["prompt"])
+        verdict  = parse_verdict(response)
+        actual   = s["expected_verdict"]
+        dtype    = s["deception_type"]
+        tools_per_type.setdefault(dtype, Counter()).update(extract_tools_called(response))
+        if verdict is None:
+            results["parse_err"] += 1
+            continue
+        if   actual == "REJECTED" and verdict == "REJECTED": results["tp"] += 1
+        elif actual == "APPROVED" and verdict == "APPROVED": results["tn"] += 1
+        elif actual == "APPROVED" and verdict == "REJECTED": results["fp"] += 1
+        elif actual == "REJECTED" and verdict == "APPROVED":
+            results["fn"] += 1
+            fn_breakdown[dtype] += 1
+
+    total   = sum(results.values())
+    correct = results["tp"] + results["tn"]
+    prec    = results["tp"] / max(results["tp"] + results["fp"], 1)
+    rec     = results["tp"] / max(results["tp"] + results["fn"], 1)
+    f1      = 2 * prec * rec / max(prec + rec, 1e-9)
+
+    summary = {
+        "n":        total,
+        "accuracy": correct / max(total, 1),
+        "precision": prec,
+        "recall":   rec,
+        "f1":       f1,
+        "missed":   results["fn"],
+        "parse_errors": results["parse_err"],
+        "missed_by_type": dict(fn_breakdown),
+    }
+    print(f"\n  n={total}  acc={summary['accuracy']*100:.1f}%  "
+          f"prec={prec*100:.1f}%  rec={rec*100:.1f}%  f1={f1*100:.1f}%  "
+          f"missed={results['fn']}  parse_err={results['parse_err']}")
+    return summary, tools_per_type
+
+
+# ── Baseline eval BEFORE any training — gives us a number to beat ──────────
+print("\n=== BASELINE — untrained Qwen2.5-1.5B (50 test samples) ===")
+baseline_summary, baseline_tools = evaluate(model, tokenizer, dataset, n_samples=50)
+
+
+# Run SFT warm-up:
+model = sft_warmup(model, tokenizer, dataset, steps=50)
 
 
 def sft_sanity_check(model, tokenizer, dataset, n: int = 3):
@@ -476,11 +556,13 @@ def train(model, tokenizer, dataset):
 
     batch_size = 2
     grad_accum = 2
-    num_epochs = 1  # 1350 train * 2 / (2*2) = ~1350 steps (>= 1000 target)
+    num_epochs = 1
+    max_grpo_steps = 150  # short, iterable run; reward + loss curves are visible by ~50 steps
 
     args = GRPOConfig(
         output_dir                  = "./panacea_grpo_out",
         num_train_epochs            = num_epochs,
+        max_steps                   = max_grpo_steps,
         per_device_train_batch_size = batch_size,
         gradient_accumulation_steps = grad_accum,
         learning_rate               = 5e-6,
@@ -577,92 +659,44 @@ trainer = train(model, tokenizer, dataset)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CELL 8 — Inference helper
-# ══════════════════════════════════════════════════════════════════════════════
-
-def run_inference(model, tokenizer, prompt: str) -> str:
-    """Run the trained model on a single prompt string."""
-    import torch
-    from unsloth import FastLanguageModel
-    FastLanguageModel.for_inference(model)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": prompt},
-    ]
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens = 384,
-            temperature    = 0.2,
-            top_p          = 0.9,
-            do_sample      = True,
-            pad_token_id   = tokenizer.eos_token_id,
-        )
-
-    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 9 — Evaluate + curriculum drift chart
 # ══════════════════════════════════════════════════════════════════════════════
 
-def evaluate(model, tokenizer, dataset, n_samples: int = 50):
-    test_split = dataset["test"]
-    n = min(n_samples, len(test_split))
-    samples = test_split.select(range(n))
+def plot_baseline_vs_trained(baseline: dict, trained: dict, out_path: str = "panacea_grpo_out/baseline_vs_trained.png"):
+    """Side-by-side bar chart of headline metrics, baseline vs trained."""
+    import os, matplotlib.pyplot as plt
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    results      = {"tp": 0, "tn": 0, "fp": 0, "fn": 0, "parse_err": 0}
-    fn_breakdown = Counter()
-    tools_per_type: dict[str, Counter] = {}
+    metrics = ["accuracy", "precision", "recall", "f1"]
+    base_vals = [baseline[m] * 100 for m in metrics]
+    trained_vals = [trained[m] * 100 for m in metrics]
 
-    for i in range(n):
-        s        = samples[i]
-        response = run_inference(model, tokenizer, s["prompt"])
-        verdict  = parse_verdict(response)
-        actual   = s["expected_verdict"]
-        dtype    = s["deception_type"]
+    x = range(len(metrics))
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar([i - width/2 for i in x], base_vals,    width, label="Baseline (untrained)", color="tab:gray")
+    ax.bar([i + width/2 for i in x], trained_vals, width, label="After SFT + GRPO",     color="tab:green")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels([m.capitalize() for m in metrics])
+    ax.set_ylabel("%")
+    ax.set_ylim(0, 100)
+    ax.set_title("Panacea Oversight — Baseline vs Trained")
+    ax.legend()
+    for i, (b, t) in enumerate(zip(base_vals, trained_vals)):
+        ax.text(i - width/2, b + 1, f"{b:.0f}", ha="center", fontsize=9)
+        ax.text(i + width/2, t + 1, f"{t:.0f}", ha="center", fontsize=9)
+    plt.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    print(f"\nSaved comparison chart -> {out_path}")
 
-        # Track which tools the model called per deception type
-        tools_per_type.setdefault(dtype, Counter()).update(extract_tools_called(response))
-
-        if verdict is None:
-            results["parse_err"] += 1
-            continue
-        if   actual == "REJECTED" and verdict == "REJECTED": results["tp"] += 1
-        elif actual == "APPROVED" and verdict == "APPROVED": results["tn"] += 1
-        elif actual == "APPROVED" and verdict == "REJECTED": results["fp"] += 1
-        elif actual == "REJECTED" and verdict == "APPROVED":
-            results["fn"] += 1
-            fn_breakdown[dtype] += 1
-
-    total   = sum(results.values())
-    correct = results["tp"] + results["tn"]
-    prec    = results["tp"] / max(results["tp"] + results["fp"], 1)
-    rec     = results["tp"] / max(results["tp"] + results["fn"], 1)
-    f1      = 2 * prec * rec / max(prec + rec, 1e-9)
-
-    print(f"\n{'='*45}")
-    print(f"  Eval Results  (n={total})")
-    print(f"{'='*45}")
-    print(f"  Accuracy   : {correct/total*100:.1f}%")
-    print(f"  Precision  : {prec*100:.1f}%")
-    print(f"  Recall     : {rec*100:.1f}%")
-    print(f"  F1         : {f1*100:.1f}%")
-    print(f"  Missed     : {results['fn']}  (target: 0)")
-    print(f"  By type    : {dict(fn_breakdown)}")
-    print(f"  Parse errs : {results['parse_err']}")
-    print(f"{'='*45}\n")
-
-    print("Tools called per deception type:")
-    for dtype, cnt in sorted(tools_per_type.items()):
-        top = ", ".join(f"{t}={c}" for t, c in cnt.most_common(3))
-        print(f"  {dtype:12s}: {top}")
-    return results, tools_per_type
+    print("\n" + "=" * 50)
+    print("  HEADLINE: Baseline vs Trained (n={} samples)".format(trained["n"]))
+    print("=" * 50)
+    for m in metrics:
+        delta = (trained[m] - baseline[m]) * 100
+        print(f"  {m.capitalize():10s}: {baseline[m]*100:5.1f}%  ->  {trained[m]*100:5.1f}%   ({delta:+.1f} pp)")
+    print("  Missed    : {:3d}        ->  {:3d}".format(baseline["missed"], trained["missed"]))
+    print("=" * 50)
 
 
 def plot_curriculum_drift(log_path: str = "data/curriculum_log.jsonl"):
@@ -755,8 +789,11 @@ def plot_before_after(out_dir: str = "./panacea_grpo_out"):
 
 
 # Run:
-results, tools_per_type = evaluate(model, tokenizer, dataset)
-trained_summary = evaluate_per_type(model, tokenizer, dataset, n_per_type=10, tag="trained")
+print("\n=== TRAINED — Qwen2.5-1.5B + SFT + GRPO (50 test samples) ===")
+trained_summary, trained_tools = evaluate(model, tokenizer, dataset, n_samples=50)
+plot_baseline_vs_trained(baseline_summary, trained_summary)
+
+trained_summary_per_type = evaluate_per_type(model, tokenizer, dataset, n_per_type=10, tag="trained")
 plot_before_after()
 plot_curriculum_drift()
 
