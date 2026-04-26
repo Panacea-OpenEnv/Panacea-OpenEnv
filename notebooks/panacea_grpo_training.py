@@ -206,6 +206,35 @@ def load_model():
 model, tokenizer = load_model()
 
 
+# ── Inference helper — defined early so every downstream cell can call it ─────
+
+def run_inference(model, tokenizer, prompt: str) -> str:
+    """Run the model on a single prompt string."""
+    import torch
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens = 384,
+            temperature    = 0.2,
+            top_p          = 0.9,
+            do_sample      = True,
+            pad_token_id   = tokenizer.eos_token_id,
+        )
+
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CELL 3.5 — Baseline eval BEFORE training (snapshot the untrained model)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -305,9 +334,8 @@ def _print_distribution(split):
 # Run:
 dataset = build_dataset_from_jsonl("data/pomdp_trajectories.jsonl")
 
-# Baseline eval — snapshot the UNTRAINED model so we can show before/after
-# (run_inference is defined later in CELL 8 but Python only resolves it at call time)
-baseline_summary = evaluate_per_type(model, tokenizer, dataset, n_per_type=10, tag="baseline")
+# Baseline eval is skipped here to save time — GRPO runs directly.
+# (evaluate_per_type is still available if you want to run it manually after training)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -369,34 +397,8 @@ tool_trace_reward_fn, format_reward_fn, tool_use_reward_fn = make_reward_fns()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CELL 6 — Inference + evaluation helpers
+# CELL 6 — evaluate() helper (run_inference defined above near model load)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def run_inference(model, tokenizer, prompt: str) -> str:
-    """Run the model on a single prompt string."""
-    import torch
-    from unsloth import FastLanguageModel
-    FastLanguageModel.for_inference(model)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": prompt},
-    ]
-    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
-
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens = 384,
-            temperature    = 0.2,
-            top_p          = 0.9,
-            do_sample      = True,
-            pad_token_id   = tokenizer.eos_token_id,
-        )
-
-    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 
 def evaluate(model, tokenizer, dataset, n_samples: int = 50):
