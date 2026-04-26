@@ -123,8 +123,7 @@ with PanaceaEnv("https://anilpaliwal132-panacea.hf.space").sync() as env:
 
 **3. Run Locally with Docker:**
 ```bash
-docker build -t panacea .
-docker run -p 7860:7860 panacea
+docker build -t panacea . && docker run -p 7860:7860 panacea
 ```
 
 ---
