@@ -12,6 +12,7 @@
 |----------|------|
 | **Live Environment**(HF Space) | [anilpaliwal132-panacea.hf.space](https://huggingface.co/spaces/Anilpaliwal132/panacea/tree/main) |
 | **Training Notebook**(Colab) | https://colab.research.google.com/drive/1lSv-wcmtMd8FbsNlAq8uraWKbGp6vIe2?usp=sharing |
+| **Training Logs** | [grpo_run_1.log](https://github.com/Panacea-OpenEnv/Panacea-OpenEnv/blob/main/logs/grpo_run_1.log) |
 | **GitHub Repository**| [Panacea-OpenEnv](https://github.com/Panacea-OpenEnv/Panacea-OpenEnv.git) |
 
 ---
