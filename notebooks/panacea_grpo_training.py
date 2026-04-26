@@ -384,10 +384,11 @@ def train(model, tokenizer, dataset):
 
     batch_size = 2
     grad_accum = 2
+    num_epochs = 2  # 1350 train * 2 / (2*2) = ~1350 steps (>= 1000 target)
 
     args = GRPOConfig(
         output_dir                  = "./panacea_grpo_out",
-        num_train_epochs            = 1,
+        num_train_epochs            = num_epochs,
         per_device_train_batch_size = batch_size,
         gradient_accumulation_steps = grad_accum,
         learning_rate               = 5e-6,
@@ -395,7 +396,7 @@ def train(model, tokenizer, dataset):
         max_completion_length       = 384,    # trajectories average ~250 tokens
         max_prompt_length           = 1024,
         logging_steps               = 1,
-        save_steps                  = 100,
+        save_steps                  = 200,
         seed                        = 42,
         report_to                   = "none",
         remove_unused_columns       = False,
@@ -411,6 +412,7 @@ def train(model, tokenizer, dataset):
 
     print("Starting GRPO training on POMDP trajectories...")
     print(f"  Train samples : {len(dataset['train'])}")
+    print(f"  Epochs        : {num_epochs}")
     print(f"  Batch size    : {batch_size} x {grad_accum} accum")
     print(f"  Generations   : {args.num_generations} per prompt")
     print(f"  Max completion: {args.max_completion_length} tokens")
@@ -421,7 +423,61 @@ def train(model, tokenizer, dataset):
     trainer.save_model("./panacea_oversight_model")
     tokenizer.save_pretrained("./panacea_oversight_model")
     print("Saved to ./panacea_oversight_model")
+
+    # Persist full step-by-step metrics for the report
+    save_training_metrics(trainer, out_dir="./panacea_grpo_out")
     return trainer
+
+
+def save_training_metrics(trainer, out_dir: str = "./panacea_grpo_out"):
+    """Dump every logged step (loss + per-reward-fn means) to JSONL/CSV and
+    render a loss/reward curve. The `trainer.state.log_history` is the
+    canonical source — every `logging_steps` tick appends a dict here."""
+    import csv
+
+    os.makedirs(out_dir, exist_ok=True)
+    history = trainer.state.log_history or []
+
+    jsonl_path = os.path.join(out_dir, "training_metrics.jsonl")
+    with open(jsonl_path, "w") as f:
+        for row in history:
+            f.write(json.dumps(row) + "\n")
+
+    keys = sorted({k for row in history for k in row.keys()})
+    csv_path = os.path.join(out_dir, "training_metrics.csv")
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        for row in history:
+            w.writerow({k: row.get(k, "") for k in keys})
+
+    print(f"Wrote {len(history)} log rows -> {jsonl_path}")
+    print(f"Columns: {keys}")
+
+    try:
+        import matplotlib.pyplot as plt
+        loss_steps = [r["step"] for r in history if "loss" in r and "step" in r]
+        loss_vals  = [r["loss"] for r in history if "loss" in r and "step" in r]
+        reward_keys = [k for k in keys if k.startswith("rewards/") or k == "reward"]
+
+        fig, ax = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+        if loss_vals:
+            ax[0].plot(loss_steps, loss_vals, color="tab:red")
+            ax[0].set_ylabel("loss"); ax[0].grid(alpha=0.3)
+        for rk in reward_keys:
+            xs = [r["step"] for r in history if rk in r and "step" in r]
+            ys = [r[rk]     for r in history if rk in r and "step" in r]
+            if ys:
+                ax[1].plot(xs, ys, label=rk)
+        ax[1].set_xlabel("logging step"); ax[1].set_ylabel("reward")
+        ax[1].legend(loc="best", fontsize=8); ax[1].grid(alpha=0.3)
+        fig.suptitle("GRPO training: loss + per-reward-fn means")
+        fig.tight_layout()
+        chart = os.path.join(out_dir, "training_curves.png")
+        fig.savefig(chart, dpi=120)
+        print(f"Saved chart -> {chart}")
+    except Exception as e:
+        print(f"(plot skipped: {e})")
 
 # Run:
 trainer = train(model, tokenizer, dataset)
