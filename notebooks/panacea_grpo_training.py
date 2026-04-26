@@ -351,10 +351,11 @@ def sft_warmup(model, tokenizer, dataset, steps: int = 50):
         report_to                   = "none",
         max_seq_length              = 1536,
     )
-    def _formatting_func(example):
-        return tokenizer.apply_chat_template(
-            example["messages"], tokenize=False, add_generation_prompt=False,
-        )
+    def _formatting_func(examples):
+        msgs = examples["messages"]
+        if isinstance(msgs, list) and msgs and isinstance(msgs[0], dict):
+            return [tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)]
+        return [tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=False) for m in msgs]
 
     trainer = SFTTrainer(
         model            = model,
