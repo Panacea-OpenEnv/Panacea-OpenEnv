@@ -1,21 +1,8 @@
-version: '3.8'
-
 services:
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: panacea
+  panacea-env:
+    build: .
     ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d panacea"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  postgres_data:
+      - "7860:7860"
+    environment:
+      PORT: 7860
+    restart: unless-stopped

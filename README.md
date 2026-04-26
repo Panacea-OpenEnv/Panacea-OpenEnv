@@ -1,3 +1,13 @@
+---
+title: Panacea
+emoji: 🏥
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+app_port: 7860
+---
+
 # Project Panacea ⚕️🛡️
 
 > **Defending the Healthcare Commons from Adversarial Agents.**
