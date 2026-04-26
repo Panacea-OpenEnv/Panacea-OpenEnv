@@ -1,9 +1,4 @@
-"""
-Panacea — OpenEnv Hospital Oversight Environment
-
-An adversarial multi-agent environment for training LLM oversight agents
-to detect deception in hospital resource claims.
-"""
+"""Panacea — adversarial hospital oversight environment for OpenEnv."""
 
 from .models import (
     OversightAction,
@@ -16,7 +11,6 @@ from .scenario_generator import generate_scenario
 from .reward import compute_reward, compute_reward_batch
 from .tool_backends import TOOL_BACKENDS, TOOL_NAMES, call_tool, tool_cost
 
-# Client import is deferred — requires openenv-core installed
 try:
     from .client import PanaceaEnv
 except ImportError:

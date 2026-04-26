@@ -1,4 +1,4 @@
-"""Root-level entry point that re-exports the FastAPI app from openenv_panacea."""
+"""Root entry point. Re-exports the FastAPI app for the OpenEnv `server` script."""
 
 import os
 import uvicorn

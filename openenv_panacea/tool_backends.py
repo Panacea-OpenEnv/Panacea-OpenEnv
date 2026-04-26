@@ -1,19 +1,10 @@
-"""
-Tool backends for the Panacea OpenEnv POMDP environment.
-
-Standalone copy (no src.* imports) so the openenv_panacea package can be
-pip-installed and run independently of the larger repo.
-
-Mirrors src/environment/tool_backends.py exactly.
-"""
+"""Five mock enterprise tools the oversight agent can call for evidence."""
 
 from __future__ import annotations
 
 import random
 from typing import Optional
 
-
-# ── Backend metadata ─────────────────────────────────────────────────────────
 
 TOOL_BACKENDS: dict[str, dict] = {
     "TOOL_REGISTRY": {
@@ -62,16 +53,11 @@ def tool_cost(tool_name: str) -> float:
     return b["base_cost"] + b["latency_penalty"]
 
 
-# ── Per-tool view formatters ─────────────────────────────────────────────────
-
 def _view_registry(episode: dict) -> str:
     patient = episode.get("patient")
     pid = episode.get("patient_id", "UNKNOWN")
     if patient is None:
-        return (
-            f"[REGISTRY] Lookup pid={pid}: NO RECORD FOUND. "
-            f"Patient ID does not exist in national registry."
-        )
+        return f"[REGISTRY] Lookup pid={pid}: NO RECORD FOUND. Patient ID does not exist in national registry."
     return (
         f"[REGISTRY] Lookup pid={pid}: VERIFIED. "
         f"name='{patient['name']}', age={patient['age']}, "
@@ -148,15 +134,11 @@ _VIEWERS = {
 
 
 def call_tool(tool_name: str, episode: dict, rng: Optional[random.Random] = None) -> str:
-    """Invoke a backend against the current episode.
-
-    Returns evidence string. On reliability failure, returns UNAVAILABLE
-    so the agent must cope with partial information.
-    """
     if tool_name not in TOOL_BACKENDS:
         raise ValueError(f"Unknown tool: {tool_name}")
 
     r = rng if rng is not None else random
+    # Each tool has a per-call reliability; misses return UNAVAILABLE so the agent has to cope.
     if r.random() > TOOL_BACKENDS[tool_name]["reliability"]:
         app = TOOL_BACKENDS[tool_name]["app"]
         return f"[{app}] {UNAVAILABLE}"
