@@ -132,8 +132,8 @@ def main() -> None:
     p.add_argument("--n", type=int, default=200)
     p.add_argument("--difficulty", type=int, default=3)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--adaptive", action="store_true",
-                   help="Use AdaptiveDeceptionSampler to reweight types")
+    p.add_argument("--adaptive", action=argparse.BooleanOptionalAction, default=True,
+                   help="Use AdaptiveDeceptionSampler to reweight types (default on)")
     p.add_argument("--out", type=str, default="data/pomdp_trajectories.jsonl")
     args = p.parse_args()
     harvest(args.n, args.difficulty, args.out, args.seed, args.adaptive)

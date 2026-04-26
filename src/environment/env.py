@@ -13,6 +13,9 @@ Usage:
     obs, reward, done, truncated, info = env.step(action=2)  # REJECTED
 """
 
+import json
+import os
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -20,6 +23,11 @@ import numpy as np
 from ..training.scenario_generator import ScenarioGenerator
 from ..environment.reward import compute_reward
 from .tool_backends import TOOL_BACKENDS, TOOL_NAMES, call_tool, tool_cost
+
+# Where the curriculum log lands. Override via env var for unit tests.
+CURRICULUM_LOG_PATH = os.environ.get(
+    "PANACEA_CURRICULUM_LOG", "data/curriculum_log.jsonl"
+)
 
 
 class PanaceaEnv(gym.Env):
@@ -199,7 +207,9 @@ class PanaceaPOMDPEnv(gym.Env):
 
     def __init__(self, difficulty: int = 1, seed: int | None = None,
                  max_steps: int | None = None, adaptive: bool = False,
-                 adaptive_window: int = 50):
+                 adaptive_window: int = 50,
+                 curriculum_log_path: str | None = None,
+                 curriculum_log_every: int = 50):
         super().__init__()
         self.difficulty = difficulty
         self.generator = ScenarioGenerator(seed=seed)
@@ -212,6 +222,15 @@ class PanaceaPOMDPEnv(gym.Env):
             self.adaptive_sampler = AdaptiveDeceptionSampler(
                 window=adaptive_window, seed=seed,
             )
+
+        # Curriculum drift log — episode-level snapshots of the adaptive sampler.
+        # Off by default for non-adaptive runs; auto-on whenever adaptive=True.
+        self.curriculum_log_path = (
+            curriculum_log_path if curriculum_log_path is not None
+            else (CURRICULUM_LOG_PATH if adaptive else None)
+        )
+        self.curriculum_log_every = curriculum_log_every
+        self._episode_counter = 0
 
         n_tools = len(TOOL_NAMES)
         self.action_space = spaces.Discrete(2 + n_tools)
@@ -310,7 +329,9 @@ class PanaceaPOMDPEnv(gym.Env):
                 "ground_truth": gt,
             }
 
-        # Terminal verdict
+        # Terminal verdict — pass tool outputs as evidence so the +0.5 bonus
+        # is awarded only when the agent actually called the right tool AND
+        # the tool returned the canonical evidence flag (uncheatable).
         verdict = "APPROVED" if action == self.APPROVE else "REJECTED"
         accuracy_reward = compute_reward(
             verdict=verdict,
@@ -318,6 +339,7 @@ class PanaceaPOMDPEnv(gym.Env):
             deception_type=self._scenario["deception_type"],
             reasoning=self._context,
             step_count=self.step_count,
+            evidence={"tool_outputs": self._context},
         )
         reward = accuracy_reward + self._tool_cost_total
 
@@ -329,6 +351,15 @@ class PanaceaPOMDPEnv(gym.Env):
             dtype = self._scenario["deception_type"]
             detected = (verdict == "REJECTED") if dtype != "none" else (verdict == "APPROVED")
             self.adaptive_sampler.record(dtype, detected)
+
+        # Episode-level curriculum-drift snapshot (every N completed episodes)
+        self._episode_counter += 1
+        if (
+            self.adaptive_sampler is not None
+            and self.curriculum_log_path
+            and self._episode_counter % self.curriculum_log_every == 0
+        ):
+            self._write_curriculum_snapshot()
 
         info = {
             "status": "verdict",
@@ -395,6 +426,25 @@ class PanaceaPOMDPEnv(gym.Env):
             self.trust_ledger[department] = max(
                 0.0, self.trust_ledger[department] - amount
             )
+
+    def _write_curriculum_snapshot(self) -> None:
+        """Append one snapshot row to the curriculum drift log."""
+        if self.adaptive_sampler is None or not self.curriculum_log_path:
+            return
+        snap = self.adaptive_sampler.snapshot()
+        record = {
+            "episode": self._episode_counter,
+            "weights": snap["weights"],
+            "detection_rates": snap["detection_rates"],
+            "samples": snap["samples"],
+        }
+        try:
+            os.makedirs(os.path.dirname(self.curriculum_log_path) or ".", exist_ok=True)
+            with open(self.curriculum_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError:
+            # Logging failures must never abort training
+            pass
 
 
 # Backward-compat alias for callers that want the original single-step env

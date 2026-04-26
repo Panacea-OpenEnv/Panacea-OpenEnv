@@ -26,7 +26,6 @@ from dotenv import load_dotenv
 
 from .stt import stt
 from .tts import tts
-from ..agents.intake_nurse import run_intake_interview, inject_intake_reply
 from ..agents.smart_router import route_complaint
 from ..agents.specialist_gpt import run_specialist_consultation, inject_patient_reply
 from ..agents.consult_bridge import detect_consult_request, run_consult
@@ -48,93 +47,6 @@ _consult_reply_queue: asyncio.Queue = asyncio.Queue()
 
 async def _get_consult_patient_reply() -> str:
     return await _consult_reply_queue.get()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 1 + 2: Intake interview + smart routing
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _run_intake_phase(
-    initial_complaint: str,
-    text_mode: bool,
-    loop: asyncio.AbstractEventLoop,
-) -> dict:
-    """Run nurse interview then return structured complaint + routing."""
-
-    intake_turn_signal: asyncio.Queue = asyncio.Queue()
-    response_buffer = []
-    json_detected = False
-
-    def on_token(token: str):
-        nonlocal json_detected
-        response_buffer.append(token)
-        so_far = "".join(response_buffer).lstrip()
-        if so_far.startswith("{"):
-            json_detected = True
-        if not json_detected:
-            tts.stream_token(token)
-
-    def on_intake_turn(turn_info: dict):
-        nonlocal json_detected
-        if not json_detected:
-            tts.flush_buffer()
-        intake_turn_signal.put_nowait({**turn_info, "buffer": "".join(response_buffer)})
-        response_buffer.clear()
-        json_detected = False
-
-    nurse_task = asyncio.create_task(
-        run_intake_interview(
-            initial_complaint=initial_complaint,
-            on_token=on_token,
-            on_turn_complete=on_intake_turn,
-            voice_mode=True,
-        )
-    )
-
-    async def nurse_reply_loop():
-        while not nurse_task.done():
-            try:
-                turn_info = await asyncio.wait_for(intake_turn_signal.get(), timeout=90.0)
-            except asyncio.TimeoutError:
-                break
-
-            response_text = turn_info.get("response", "")
-            is_json = response_text.lstrip().startswith("{")
-
-            if response_text and not is_json:
-                # Display question in terminal (audio was already streamed sentence-by-sentence)
-                display.nurse_question(response_text)
-                await loop.run_in_executor(None, tts.wait_until_done)
-
-            # If this was the final JSON summary turn, nurse_task will be done
-            if nurse_task.done():
-                break
-
-            if text_mode:
-                print("\nYour reply: ", end="", flush=True)
-                reply = input().strip()
-            else:
-                # Flush mic buffer so TTS speaker audio isn't transcribed as patient speech
-                await loop.run_in_executor(None, stt.flush_input_buffer)
-                display.patient_listening()
-                reply = await loop.run_in_executor(None, stt.record_until_silence)
-
-            reply = reply or "I am not sure."
-            display.patient_speech(reply)
-            await inject_intake_reply(reply)
-
-    reply_task = asyncio.create_task(nurse_reply_loop())
-
-    try:
-        structured = await nurse_task
-    finally:
-        reply_task.cancel()
-        try:
-            await reply_task
-        except asyncio.CancelledError:
-            pass
-
-    return structured
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,8 +112,14 @@ async def _run_voice_specialist(
             if spec_task.done():
                 break
 
-            # Phase 3: Check if specialist wants a cross-consult
+            # If the specialist just delivered the final JSON assessment, stop here.
+            # spec_task.done() may still be False (awaiting MongoDB save), so we check
+            # the buffer directly instead of relying on task completion timing.
             full_text = turn_info.get("buffer", turn_info.get("response", ""))
+            if full_text.lstrip().startswith("{"):
+                break
+
+            # Phase 3: Check if specialist wants a cross-consult
             consult_req = await detect_consult_request(full_text)
             if consult_req and consult_req.get("consult_specialty") not in consults_done:
                 consult_spec = consult_req["consult_specialty"]
@@ -454,17 +372,23 @@ async def run_voice_session(
         patient_answers.append({"question": question, "answer": answer})
 
     # Build structured intake from council + patient answers
+    # Include all patient answers so the router sees the real symptoms, not just the initial complaint
     qa_text = "\n".join(f"Q: {a['question']}\nA: {a['answer']}" for a in patient_answers)
+    associated_symptoms = [a["answer"] for a in patient_answers if a.get("answer")]
+    enriched_complaint = complaint
+    if associated_symptoms:
+        enriched_complaint = f"{complaint} Additional symptoms reported: {'; '.join(associated_symptoms)}"
+
     structured = {
-        "chief_complaint": complaint,
+        "chief_complaint": enriched_complaint,
         "council_assessment": council["primary_assessment"],
         "peer_opinions": [p["opinion"] for p in council["peer_opinions"]],
         "patient_qa": qa_text,
         "severity": "moderate",
         "severity_signals": [],
-        "associated_symptoms": [],
+        "associated_symptoms": associated_symptoms,
         "modifiers": {},
-        "suspected_systems": [primary],
+        "suspected_systems": [],   # Let smart router decide after seeing all answers
         "duration": "as described by patient",
     }
 
@@ -472,10 +396,10 @@ async def run_voice_session(
     tts.speak("Thank you. Let me now connect you with the specialist team.")
     routing = await route_complaint(structured)
 
-    # Always lead with council's detected primary
-    specialists_raw: list[str] = routing.get("specialists", [primary])
-    if primary not in specialists_raw:
-        specialists_raw.insert(0, primary)
+    # Use router's decision; only fall back to initial primary if router returned nothing
+    specialists_raw: list[str] = routing.get("specialists", [])
+    if not specialists_raw:
+        specialists_raw = [primary]
     specialists: list[str] = specialists_raw[:3]
     urgency:     str       = routing.get("urgency", "medium")
     reason:      str       = routing.get("routing_reason", "")
@@ -489,6 +413,28 @@ async def run_voice_session(
     display.router(specialists, urgency)
     display.info(f"Routing reason: {reason}")
     await loop.run_in_executor(None, tts.wait_until_done)
+
+    # ── Build clinical handoff note for specialists ───────────────────────────
+    # Specialists receive everything gathered so far so they don't re-ask
+    # questions the patient already answered during the intake phase.
+    handoff_lines = [
+        f"PATIENT COMPLAINT: {complaint}",
+    ]
+    if patient_answers:
+        handoff_lines.append("INTAKE Q&A (already collected — do not re-ask these):")
+        for a in patient_answers:
+            handoff_lines.append(f"  Q: {a['question']}")
+            handoff_lines.append(f"  A: {a['answer']}")
+    if council.get("primary_assessment"):
+        handoff_lines.append(f"CLINICAL PRE-ASSESSMENT: {council['primary_assessment']}")
+    if council.get("peer_opinions"):
+        opinions = "; ".join(p.get("opinion", "")[:120] for p in council["peer_opinions"])
+        handoff_lines.append(f"PEER SPECIALIST INPUT: {opinions}")
+    handoff_lines.append(
+        "Based on the above context, proceed directly to your specialist assessment. "
+        "Do not repeat questions already answered above."
+    )
+    clinical_handoff = "\n".join(handoff_lines)
 
     # ── Phase 3: Specialist consultations ─────────────────────────────────────
     reports: list[dict] = []
@@ -504,7 +450,7 @@ async def run_voice_session(
                 patient_id=patient_id,
                 patient=patient,
                 session_id=session_id,
-                complaint=structured.get("chief_complaint", complaint),
+                complaint=clinical_handoff,
                 text_mode=text_mode,
                 loop=loop,
             )
