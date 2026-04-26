@@ -34,7 +34,7 @@ from src.inference.inference_server import query_oversight_model, _deterministic
 
 console = Console()
 
-# ── Color scheme ──────────────────────────────────────────────────────────────
+#  Color scheme 
 
 DECEPTION_COLORS = {
     "ghost":     "bold red",
@@ -56,11 +56,11 @@ def display_episode(episode_num: int, scenario: dict, result: dict, mode: str) -
     ground_truth = scenario["ground_truth_label"]
     color = DECEPTION_COLORS.get(deception, "white")
 
-    # ── Header ────────────────────────────────────────────────────────────────
+    #  Header 
     console.print()
     console.print(Rule(f"Episode {episode_num}", style="bright_blue"))
 
-    # ── Patient Panel ─────────────────────────────────────────────────────────
+    #  Patient Panel 
     if patient:
         v = patient["vitals"]
         patient_text = (
@@ -77,7 +77,7 @@ def display_episode(episode_num: int, scenario: dict, result: dict, mode: str) -
 
     console.print(Panel(patient_text, title="[bold] Patient Record ", border_style="dim"))
 
-    # ── Specialist Reports ────────────────────────────────────────────────────
+    #  Specialist Reports 
     for i, r in enumerate(reports, 1):
         meds = ", ".join(m["name"] for m in r.get("medications", []))
         report_text = (
@@ -92,7 +92,7 @@ def display_episode(episode_num: int, scenario: dict, result: dict, mode: str) -
             border_style="cyan",
         ))
 
-    # ── Claim ─────────────────────────────────────────────────────────────────
+    #  Claim 
     claimed = scenario.get("claimed_amount", 0)
     expected = scenario.get("expected_cost", 0)
     console.print(
@@ -101,7 +101,7 @@ def display_episode(episode_num: int, scenario: dict, result: dict, mode: str) -
         f"[bold white]Expected:[/] ${expected:,.2f}"
     )
 
-    # ── Oversight Agent Reasoning ─────────────────────────────────────────────
+    #  Oversight Agent Reasoning 
     console.print()
 
     decision = result["decision"]
@@ -116,7 +116,7 @@ def display_episode(episode_num: int, scenario: dict, result: dict, mode: str) -
         flags_str = ", ".join(f"[bold red]{f}[/]" for f in fraud_flags)
         console.print(f"  [dim]Fraud Flags:[/] {flags_str}")
 
-    # ── Reward ────────────────────────────────────────────────────────────────
+    #  Reward 
     # Use PanaceaEnv scoring logic
     action_map = {"APPROVED": 0, "PARTIAL": 1, "REJECTED": 2}
     action = action_map.get(decision, 2)
@@ -179,7 +179,7 @@ async def main():
     mode = "rl" if args.use_rl_model else "deterministic"
     diff_name = DIFFICULTY_NAMES.get(args.difficulty, "?")
 
-    # ── Banner ────────────────────────────────────────────────────────────────
+    #  Banner 
     console.print()
     console.print(Panel(
         f"[bold white]Adversarial Hospital Oversight Environment[/]\n"
@@ -204,7 +204,7 @@ async def main():
         ))
         mode = "deterministic"
 
-    # ── Generate and run episodes ─────────────────────────────────────────────
+    #  Generate and run episodes 
     gen = ScenarioGenerator(seed=args.seed)
     results = []
 
@@ -219,7 +219,7 @@ async def main():
         ep_result = display_episode(i, scenario, result, mode)
         results.append(ep_result)
 
-    # ── Summary Table ─────────────────────────────────────────────────────────
+    #  Summary Table 
     console.print()
     console.print(Rule("Session Summary", style="bright_green"))
 

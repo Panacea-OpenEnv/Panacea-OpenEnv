@@ -129,13 +129,13 @@ if __name__ == "__main__":
     print("  PANACEA GRPO Training — Pre-Flight Checks")
     print("=" * 60)
 
-    # 1. Validate reward function
+    # Validate reward function
     test_reward_function()
 
-    # 2. Validate environment
+    # Validate environment
     validate_environment(n_episodes=20)
 
-    # 3. Generate training data
+    # Generate training data
     generate_training_data(n=100)
 
     print("\n" + "=" * 60)

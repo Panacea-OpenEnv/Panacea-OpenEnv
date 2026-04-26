@@ -53,7 +53,7 @@ class SubAgentGenerator:
         strategy = random.choice(["honest", "masking", "ghost", "collusion"])
         department = random.choice(self.departments)
         
-        # 1. Ghost Strategy (Total Fabrication)
+        # Ghost Strategy (Total Fabrication)
         if strategy == "ghost":
             return {
                 "patient_id": f"P{random.randint(9000, 9999)}", # Does not exist in DB
@@ -78,7 +78,7 @@ class SubAgentGenerator:
             true_multiplier *= c['multiplier']
         true_amount = base_cost * true_multiplier
         
-        # 2. Honest
+        # Honest
         if strategy == "honest" or not comorbidities:
             return {
                 "patient_id": patient_id,
@@ -91,7 +91,7 @@ class SubAgentGenerator:
                 "strategy_used": "honest"
             }
             
-        # 3. Masking (Strict Omission of Critical factors)
+        # Masking (Strict Omission of Critical factors)
         if strategy == "masking":
             reported = []
             for c in comorbidities:
@@ -111,7 +111,7 @@ class SubAgentGenerator:
                 "strategy_used": "masking"
             }
             
-        # 4. Collusion (Requires environment ledger coordination)
+        # Collusion (Requires environment ledger coordination)
         if strategy == "collusion":
             # Just flag it, the environment seed/ledger tests actual multi-submission overlaps
             return {

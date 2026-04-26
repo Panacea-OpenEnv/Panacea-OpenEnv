@@ -111,14 +111,14 @@ async def verify_claim(claim_id: int, review: ClaimReview):
     resource = claim_record['requested_resource']
     department = claim_record['department']
 
-    # 1. Evaluate Ghost Attack
+    # Evaluate Ghost Attack
     is_ghost = await check_ghost_patient(patient_id)
     if is_ghost and review.verdict:
         # Allocated to a ghost!
         await db.execute("UPDATE claims SET status = 'rejected' WHERE id = $1", claim_id)
         return {"status": "success", "correct": False, "violation": "ghost_allocation", "department": department}
 
-    # 2. Evaluate Resource Cascade
+    # Evaluate Resource Cascade
     cascade_failed = False
     if resource and review.verdict:
         if not await process_resource_cascade(resource):

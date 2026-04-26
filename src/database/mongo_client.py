@@ -15,7 +15,7 @@ load_dotenv()
 MONGODB_URI     = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "panacea")
 
-# ── Collection names ──────────────────────────────────────────────────────────
+#  Collection names 
 PATIENTS               = "patients"
 VITALS                 = "vitals"
 COMORBIDITIES          = "comorbidities"
@@ -32,7 +32,7 @@ ALL_COLLECTIONS = [
     SPECIALIST_REPORTS, MEDICAL_SUMMARIES,
 ]
 
-# ── Async client (used by FastAPI, LangGraph nodes, voice pipeline) ───────────
+#  Async client (used by FastAPI, LangGraph nodes, voice pipeline) 
 _async_client: AsyncIOMotorClient | None = None
 
 def get_async_client() -> AsyncIOMotorClient:
@@ -58,7 +58,7 @@ async def close_async_client():
         _async_client.close()
         _async_client = None
 
-# ── Sync client (used by seed script, training scripts) ──────────────────────
+#  Sync client (used by seed script, training scripts) 
 _sync_client: MongoClient | None = None
 
 def get_sync_client() -> MongoClient:
@@ -77,7 +77,7 @@ def get_sync_db():
 def get_sync_collection(name: str):
     return get_sync_db()[name]
 
-# ── Ping ──────────────────────────────────────────────────────────────────────
+#  Ping 
 def ping_db() -> bool:
     try:
         get_sync_client().admin.command("ping")
@@ -85,7 +85,7 @@ def ping_db() -> bool:
     except ConnectionFailure:
         return False
 
-# ── Index setup (run once at startup) ────────────────────────────────────────
+#  Index setup (run once at startup) 
 def create_indexes():
     """Create all indexes. Safe to call multiple times — MongoDB skips existing."""
     db = get_sync_db()
@@ -119,7 +119,7 @@ def create_indexes():
 
     print(f"[MongoDB] Indexes created on all {len(ALL_COLLECTIONS)} collections")
 
-# ── Patient history helpers (used by GPT-4o agents) ──────────────────────────
+#  Patient history helpers (used by GPT-4o agents) 
 async def get_patient_history(patient_id: str, limit: int = 3) -> list[dict]:
     """
     Fetch last N consultations for a patient.

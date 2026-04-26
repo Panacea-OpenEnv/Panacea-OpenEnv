@@ -33,7 +33,7 @@ Anchor flags (per deception type) the agent must surface in evidence:
 
 from __future__ import annotations
 
-# ── Anchor configuration ─────────────────────────────────────────────────────
+#  Anchor configuration 
 
 _PRIMARY_TOOL = {
     "ghost":     "TOOL_REGISTRY",

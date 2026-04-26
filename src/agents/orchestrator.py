@@ -20,9 +20,7 @@ from .nodes import (
     log_telemetry,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Conditional edge functions
-# ─────────────────────────────────────────────────────────────────────────────
 
 def route_after_ghost_check(state: PanaceaState) -> str:
     if state["ghost_patient"] or state["verification_status"] == "cannot_verify":
@@ -34,9 +32,7 @@ def route_after_primary_verify(state: PanaceaState) -> str:
         return "analyze_and_decide"
     return "check_comorbidities"
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Graph Assembly
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_graph() -> StateGraph:
     graph = StateGraph(PanaceaState)
@@ -91,9 +87,7 @@ def build_graph() -> StateGraph:
 app = build_graph().compile()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Episode runner helper (used by training loop and demo)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run_episode(override_state: dict | None = None) -> PanaceaState:
     state = initial_state()

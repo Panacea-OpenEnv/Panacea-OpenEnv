@@ -39,7 +39,7 @@ df = fetch_data()
 if df.empty:
     st.warning("No audit logs found. Please run the environment to populate `telemetry.db`.")
 else:
-    # 1. High Level Metrics
+    # High Level Metrics
     total_reviews = len(df[df['event_type'] == 'Oversight_Review'])
     total_rejections = len(df[(df['event_type'] == 'Oversight_Review') & (df['decision'] == 'REJECTED')])
     
@@ -56,7 +56,7 @@ else:
 
     st.divider()
 
-    # 2. Live Audit Feed
+    # Live Audit Feed
     st.subheader("Live Verification Ledger")
     
     # Filter for display
@@ -73,7 +73,7 @@ else:
         hide_index=True
     )
 
-    # 3. Analytics
+    # Analytics
     st.subheader("Department Trust Penalties Over Time")
     if not df.empty and 'agent_id' in df.columns:
         # Group rejections by department (assuming agent_id == department)

@@ -20,9 +20,7 @@ Paste each CELL block into a separate Colab cell and run top-to-bottom.
 Runtime: GPU (T4 free tier sufficient for the 1.5B model).
 """
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 1 — Install dependencies
-# ══════════════════════════════════════════════════════════════════════════════
 # Paste and run this cell first. ~3 minutes on a fresh runtime.
 
 """
@@ -31,9 +29,7 @@ Runtime: GPU (T4 free tier sufficient for the 1.5B model).
 """
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 2 — Shared utilities (no external imports)
-# ══════════════════════════════════════════════════════════════════════════════
 
 import os
 import re
@@ -81,7 +77,7 @@ def extract_tools_called(text: str) -> list[str]:
     return [m.group(1).upper() for m in _TOOL_TAG_RE.finditer(text)]
 
 
-# ── Tool-call cost table (matches src/environment/tool_backends.py) ──────────
+#  Tool-call cost table (matches src/environment/tool_backends.py) 
 
 TOOL_COSTS: dict[str, float] = {
     "TOOL_REGISTRY": -0.15,   # base -0.10 + latency -0.05
@@ -93,7 +89,7 @@ TOOL_COSTS: dict[str, float] = {
 REPEAT_TOOL_PENALTY = -0.05
 
 
-# ── Evidence-grounded reward (mirrors src/environment/reward.py) ─────────────
+#  Evidence-grounded reward (mirrors src/environment/reward.py) 
 
 _PRIMARY_TOOL = {
     "ghost": "TOOL_REGISTRY", "inflation": "TOOL_BILLING",
@@ -173,9 +169,7 @@ def replay_tool_costs(completion: str) -> float:
 print("Cell 2 ready.")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 3 — Load model with Unsloth
-# ══════════════════════════════════════════════════════════════════════════════
 
 def load_model():
     from unsloth import FastLanguageModel
@@ -205,9 +199,7 @@ def load_model():
 model, tokenizer = load_model()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 4 — Load POMDP trajectory dataset
-# ══════════════════════════════════════════════════════════════════════════════
 # Expects data/pomdp_trajectories.jsonl produced by:
 #   python -m src.training.trajectory_harvester --n 1500 --difficulty 3
 # Each line: {prompt, response, ground_truth_label, deception_type, total_reward, tool_cost_total}
@@ -256,14 +248,12 @@ def _print_distribution(split):
 dataset = build_dataset_from_jsonl("data/pomdp_trajectories.jsonl")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 5 — Reward functions
-# ══════════════════════════════════════════════════════════════════════════════
 # Three reward functions (composed by GRPO):
-#   1. tool_trace_reward_fn — accuracy + evidence + replayed tool costs
+#   tool_trace_reward_fn — accuracy + evidence + replayed tool costs
 #                             (matches PanaceaPOMDPEnv.step exactly)
-#   2. format_reward_fn     — small bonus for valid VERDICT/REASONING tags
-#   3. tool_use_reward_fn   — small bonus for calling at least one tool
+#   format_reward_fn     — small bonus for valid VERDICT/REASONING tags
+#   tool_use_reward_fn   — small bonus for calling at least one tool
 #                             (encourages investigation over guessing)
 
 def make_reward_fns():
@@ -314,9 +304,7 @@ def make_reward_fns():
 tool_trace_reward_fn, format_reward_fn, tool_use_reward_fn = make_reward_fns()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 6 — SFT warm-up (teach the <tool>X</tool> format)
-# ══════════════════════════════════════════════════════════════════════════════
 # 50 SFT steps before GRPO so the model can already emit a structured trajectory.
 # Without this warm-up, GRPO often spends 200+ steps just discovering the format.
 
@@ -373,9 +361,7 @@ def sft_warmup(model, tokenizer, dataset, steps: int = 50):
 model = sft_warmup(model, tokenizer, dataset, steps=50)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 7 — GRPO training on POMDP trajectories
-# ══════════════════════════════════════════════════════════════════════════════
 
 def train(model, tokenizer, dataset):
     from trl import GRPOTrainer, GRPOConfig
@@ -483,9 +469,7 @@ def save_training_metrics(trainer, out_dir: str = "./panacea_grpo_out"):
 trainer = train(model, tokenizer, dataset)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 8 — Inference helper
-# ══════════════════════════════════════════════════════════════════════════════
 
 def run_inference(model, tokenizer, prompt: str) -> str:
     """Run the trained model on a single prompt string."""
@@ -514,9 +498,7 @@ def run_inference(model, tokenizer, prompt: str) -> str:
     return tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 9 — Evaluate + curriculum drift chart
-# ══════════════════════════════════════════════════════════════════════════════
 
 def evaluate(model, tokenizer, dataset, n_samples: int = 50):
     test_split = dataset["test"]
@@ -607,9 +589,7 @@ results, tools_per_type = evaluate(model, tokenizer, dataset)
 plot_curriculum_drift()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 10 — Export & serve with ngrok
-# ══════════════════════════════════════════════════════════════════════════════
 
 def export_and_serve(model, tokenizer, ngrok_token: str = "", hf_repo: str = ""):
     """

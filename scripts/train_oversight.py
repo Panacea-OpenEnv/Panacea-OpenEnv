@@ -38,15 +38,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
 
-# ── Path setup ────────────────────────────────────────────────────────────────
+#  Path setup 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.utils.terminal_display import display
 from src.agents.sub_agent import SubAgentGenerator, EasySubAgentGenerator
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Config
-# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class TrainingConfig:
@@ -68,9 +66,7 @@ class TrainingConfig:
         return "hard"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # In-process oversight (simulation mode — no HTTP needed)
-# ─────────────────────────────────────────────────────────────────────────────
 
 PATIENTS = [
     {"patient_id": f"P10{i:02d}", "severity_index": round(random.uniform(0.3, 1.8), 2),
@@ -102,7 +98,7 @@ def _simulate_oversight(claim: dict, true_patient: dict) -> dict:
     strategy   = claim.get("strategy_used", "honest")
     steps      = 0
 
-    # Step 1: Ghost check
+    # Ghost check
     steps += 1
     is_ghost = not any(p["patient_id"] == patient_id for p in PATIENTS)
     if is_ghost:
@@ -114,13 +110,13 @@ def _simulate_oversight(claim: dict, true_patient: dict) -> dict:
             "steps":              steps,
         }
 
-    # Step 2: Severity verification
+    # Severity verification
     steps += 1
     true_severity = true_patient.get("severity_index", 1.0)
     claimed_amount = float(claim.get("claimed_amount", 0))
     base_cost = float(true_patient.get("base_cost", 10000))
 
-    # Step 3: Comorbidity check
+    # Comorbidity check
     steps += 1
     comorbidities = true_patient.get("comorbidities", [])
     critical = [c for c in comorbidities if c.get("is_critical")]
@@ -140,7 +136,7 @@ def _simulate_oversight(claim: dict, true_patient: dict) -> dict:
             "steps":              steps,
         }
 
-    # Step 4: Inflation check
+    # Inflation check
     steps += 1
     multiplier = true_severity
     for c in comorbidities:
@@ -219,9 +215,7 @@ def _backend_oversight(claim: dict, cfg: TrainingConfig) -> dict:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Reward function
-# ─────────────────────────────────────────────────────────────────────────────
 
 def compute_rewards(
     is_attack:          bool,
@@ -257,9 +251,7 @@ def compute_rewards(
     return round(os_r, 4), round(adv_r, 4)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Trajectory buffer (for PPO)
-# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class Trajectory:
@@ -275,9 +267,7 @@ class Trajectory:
     level:          str
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # PPO update (GPU — requires trl + unsloth)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def ppo_update(trajectories: list[Trajectory], model, tokenizer, ppo_trainer) -> float:
     """
@@ -316,20 +306,18 @@ def ppo_update(trajectories: list[Trajectory], model, tokenizer, ppo_trainer) ->
     return float(stats.get("ppo/loss/total", 0.0))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Main training loop
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run_training(cfg: TrainingConfig) -> None:
     random.seed(cfg.seed)
 
     display.training_header(cfg.n_episodes)
 
-    # ── Generators ────────────────────────────────────────────────────────────
+    #  Generators 
     easy_gen = EasySubAgentGenerator()
     hard_gen = SubAgentGenerator()
 
-    # ── PPO setup (GPU only) ──────────────────────────────────────────────────
+    #  PPO setup (GPU only) 
     ppo_trainer = None
     model       = None
     tokenizer   = None
@@ -351,7 +339,7 @@ def run_training(cfg: TrainingConfig) -> None:
             print(f"[WARN] PPO disabled — missing package: {exc}")
             cfg.ppo_enabled = False
 
-    # ── Statistics ────────────────────────────────────────────────────────────
+    #  Statistics 
     stats = {
         "total":         0,
         "true_pos":      0,   # attack correctly rejected
@@ -365,7 +353,7 @@ def run_training(cfg: TrainingConfig) -> None:
     trajectory_buffer: list[Trajectory] = []
     ppo_losses:        list[float]       = []
 
-    # ── Episode loop ──────────────────────────────────────────────────────────
+    #  Episode loop 
     for ep in range(1, cfg.n_episodes + 1):
         level      = cfg.curriculum_level(ep)
         patient    = random.choice(PATIENTS)
@@ -373,7 +361,7 @@ def run_training(cfg: TrainingConfig) -> None:
 
         display.training_episode(ep, cfg.n_episodes, patient_id, level.upper())
 
-        # ── 1. Generate claim ──────────────────────────────────────────────────
+        #  Generate claim 
         if level == "easy":
             claim    = easy_gen.generate_claim(patient)
             strategy = "blatant_inflation"
@@ -396,7 +384,7 @@ def run_training(cfg: TrainingConfig) -> None:
 
         is_attack = strategy != "honest"
 
-        # ── 2. Display sub-agent claim ─────────────────────────────────────────
+        #  Display sub-agent claim 
         claimed_amount = float(claim.get("claimed_amount", 0))
         true_amount    = float(patient["base_cost"]) * float(patient["severity_index"])
         display.sub_agent_claim(
@@ -406,7 +394,7 @@ def run_training(cfg: TrainingConfig) -> None:
             actual    = true_amount,
         )
 
-        # ── 3. Run oversight ───────────────────────────────────────────────────
+        #  Run oversight 
         t_start = time.perf_counter()
 
         if cfg.simulate:
@@ -421,7 +409,7 @@ def run_training(cfg: TrainingConfig) -> None:
         reasoning = result["reasoning"]
         steps     = result["steps"]
 
-        # ── 4. SQL-style log ───────────────────────────────────────────────────
+        #  SQL-style log 
         sql_preview = (
             f"claimed={claimed_amount:.0f}, "
             f"actual≈{true_amount:.0f}, "
@@ -429,15 +417,15 @@ def run_training(cfg: TrainingConfig) -> None:
         ) if true_amount > 0 else "amount check"
         display.oversight_sql(sql_preview, f"{verdict} ({elapsed_ms:.0f}ms)")
 
-        # ── 5. Oversight flags display ─────────────────────────────────────────
+        #  Oversight flags display 
         flags = [f"{result.get('deception_type', 'unknown')}"] if deception else []
         display.oversight_check(verdict, flags)
 
-        # ── 6. Rewards ────────────────────────────────────────────────────────
+        #  Rewards 
         os_reward, adv_reward = compute_rewards(is_attack, verdict, strategy, steps)
         display.decision(verdict, os_reward)
 
-        # ── 7. Stats ──────────────────────────────────────────────────────────
+        #  Stats 
         stats["total"]      += 1
         stats["reward_sum"] += os_reward
         stats["rewards"].append(os_reward)
@@ -451,7 +439,7 @@ def run_training(cfg: TrainingConfig) -> None:
         elif is_attack and verdict == "APPROVED":
             stats["false_neg"] += 1
 
-        # ── 8. Trajectory buffer ──────────────────────────────────────────────
+        #  Trajectory buffer 
         trajectory_buffer.append(Trajectory(
             episode      = ep,
             patient_id   = patient_id,
@@ -465,7 +453,7 @@ def run_training(cfg: TrainingConfig) -> None:
             level        = level,
         ))
 
-        # ── 9. PPO update every 20 episodes ───────────────────────────────────
+        #  PPO update every 20 episodes 
         loss = 0.0
         if cfg.ppo_enabled and ep % 20 == 0 and ppo_trainer and trajectory_buffer:
             batch = trajectory_buffer[-20:]
@@ -475,7 +463,7 @@ def run_training(cfg: TrainingConfig) -> None:
         else:
             display.training_reward(os_reward, adv_reward, loss)
 
-        # ── 10. Rolling stats every 50 episodes ───────────────────────────────
+        #  Rolling stats every 50 episodes 
         if ep % 50 == 0:
             recent   = stats["rewards"][-50:]
             avg_r    = sum(recent) / len(recent)
@@ -494,7 +482,7 @@ def run_training(cfg: TrainingConfig) -> None:
                 f"Level: {level.upper()}"
             )
 
-    # ── Final stats ───────────────────────────────────────────────────────────
+    #  Final stats 
     total    = stats["total"]
     tp       = stats["true_pos"]
     fn       = stats["false_neg"]
@@ -517,7 +505,7 @@ def run_training(cfg: TrainingConfig) -> None:
         print(f"  PPO loss (final) : {ppo_losses[-1]:.4f}")
         print(f"  PPO updates      : {len(ppo_losses)}")
 
-    # ── Save trajectories ─────────────────────────────────────────────────────
+    #  Save trajectories 
     import json
     out_path = "scripts/oversight_training_log.json"
     log = [
@@ -537,9 +525,7 @@ def run_training(cfg: TrainingConfig) -> None:
     display.info(f"Training log saved → {out_path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CLI entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Panacea Oversight Agent Training")

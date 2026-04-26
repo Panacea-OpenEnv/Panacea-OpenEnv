@@ -34,7 +34,7 @@ class AdaptiveDeceptionSampler:
         }
         self._rng = random.Random(seed)
 
-    # ── Update ───────────────────────────────────────────────────────────────
+    #  Update 
 
     def record(self, deception_type: str, detected: bool) -> None:
         """Log one episode outcome.
@@ -48,7 +48,7 @@ class AdaptiveDeceptionSampler:
             return
         self._history[deception_type].append(1 if detected else 0)
 
-    # ── Sample ───────────────────────────────────────────────────────────────
+    #  Sample 
 
     def detection_rates(self) -> dict[str, float]:
         rates = {}
@@ -75,7 +75,7 @@ class AdaptiveDeceptionSampler:
         probs = [w[t] for t in types]
         return self._rng.choices(types, weights=probs, k=1)[0]
 
-    # ── Telemetry ────────────────────────────────────────────────────────────
+    #  Telemetry 
 
     def snapshot(self) -> dict:
         return {

@@ -148,7 +148,7 @@ class PanaceaEnv(gym.Env):
             f"Deception: {dtype} | Label: {label} --"
         )
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    #  Internal helpers 
 
     def _get_obs(self) -> dict:
         dept = self._scenario.get("department", "Unknown")
@@ -169,7 +169,7 @@ class PanaceaEnv(gym.Env):
             self.trust_ledger[department] = max(0.0, self.trust_ledger[department] - amount)
 
 
-# ── POMDP environment (multi-step investigation) ─────────────────────────────
+#  POMDP environment (multi-step investigation) 
 
 
 class PanaceaPOMDPEnv(gym.Env):
@@ -260,7 +260,7 @@ class PanaceaPOMDPEnv(gym.Env):
         self._tool_cost_total: float = 0.0
         self._rng = np.random.default_rng(seed)
 
-    # ── Gym API ───────────────────────────────────────────────────────────────
+    #  Gym API 
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -382,7 +382,7 @@ class PanaceaPOMDPEnv(gym.Env):
               f"tool_cost={self._tool_cost_total:+.2f} --")
         print(self._context[-600:])
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    #  Internal helpers 
 
     def _initial_context(self, episode: dict) -> str:
         """Minimal info revealed at t=0 — the agent must probe for the rest."""
@@ -451,7 +451,7 @@ class PanaceaPOMDPEnv(gym.Env):
 PanaceaEnvSingleStep = PanaceaEnv
 
 
-# ── Quick test ────────────────────────────────────────────────────────────────
+#  Quick test 
 
 if __name__ == "__main__":
     env = PanaceaEnv(difficulty=2, seed=42)

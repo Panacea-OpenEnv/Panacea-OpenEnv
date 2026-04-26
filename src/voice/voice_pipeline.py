@@ -39,9 +39,7 @@ load_dotenv()
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Shared patient reply for consult bridge
-# ─────────────────────────────────────────────────────────────────────────────
 
 _consult_reply_queue: asyncio.Queue = asyncio.Queue()
 
@@ -49,9 +47,7 @@ async def _get_consult_patient_reply() -> str:
     return await _consult_reply_queue.get()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Phase 3: Single-specialist voice consultation with Phase 3 consult bridge
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def _run_voice_specialist(
     spec_name: str,
@@ -216,9 +212,7 @@ async def _run_voice_specialist(
     return report
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Phase 4: Rich prescription synthesis
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _synthesize_reports(reports: list[dict], patient: dict, routing: dict) -> dict:
     if not reports:
@@ -289,9 +283,7 @@ def _synthesize_reports(reports: list[dict], patient: dict, routing: dict) -> di
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Main session runner
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def run_voice_session(
     patient_id: str = "P1001",
@@ -320,7 +312,7 @@ async def run_voice_session(
     )
     await loop.run_in_executor(None, tts.wait_until_done)
 
-    # ── Get initial complaint ──────────────────────────────────────────────────
+    #  Get initial complaint 
     if preset_complaint:
         complaint = preset_complaint
         text_mode = True
@@ -334,7 +326,7 @@ async def run_voice_session(
     complaint = complaint or "I have a general health concern."
     display.patient_speech(complaint)
 
-    # ── Phase 1: Immediately detect primary specialist from first complaint ─────
+    #  Phase 1: Immediately detect primary specialist from first complaint 
     display.info("Detecting primary specialist from complaint...")
     detection = await detect_primary_specialist(complaint)
     primary   = detection["primary_specialist"]
@@ -343,13 +335,13 @@ async def run_voice_session(
         f"(confidence: {detection['confidence']}) — {detection['reason']}"
     )
 
-    # ── Phase 2: Internal agent council (doctor-to-doctor, shown on terminal) ───
+    #  Phase 2: Internal agent council (doctor-to-doctor, shown on terminal) 
     # Doctors consult each other BEFORE asking the patient anything further.
     # Patient is NOT involved here — this is purely internal clinical reasoning.
     display.info("Launching internal agent council...")
     council = await run_council(primary, complaint)
 
-    # ── Phase 3: Doctor interviews patient using council-generated questions ────
+    #  Phase 3: Doctor interviews patient using council-generated questions 
     # TTS speaks each question; patient answers via voice or text.
     tts.speak(
         f"Thank you for telling me that. I am Doctor {council['primary_role']}. "
@@ -397,7 +389,7 @@ async def run_voice_session(
         "duration": "as described by patient",
     }
 
-    # ── Phase 4: Smart routing (primary already known, may add secondary) ──────
+    #  Phase 4: Smart routing (primary already known, may add secondary) 
     tts.speak("Thank you. Let me now connect you with the specialist team.")
     routing = await route_complaint(structured)
 
@@ -419,7 +411,7 @@ async def run_voice_session(
     display.info(f"Routing reason: {reason}")
     await loop.run_in_executor(None, tts.wait_until_done)
 
-    # ── Build clinical handoff note for specialists ───────────────────────────
+    #  Build clinical handoff note for specialists 
     # Specialists receive everything gathered so far so they don't re-ask
     # questions the patient already answered during the intake phase.
     handoff_lines = [
@@ -441,7 +433,7 @@ async def run_voice_session(
     )
     clinical_handoff = "\n".join(handoff_lines)
 
-    # ── Phase 3: Specialist consultations ─────────────────────────────────────
+    #  Phase 3: Specialist consultations 
     reports: list[dict] = []
 
     for spec_name in specialists:
@@ -484,7 +476,7 @@ async def run_voice_session(
         tts.stop()
         return {}
 
-    # ── Phase 4: Rich prescription synthesis ──────────────────────────────────
+    #  Phase 4: Rich prescription synthesis 
     summary = _synthesize_reports(reports, patient, routing)
 
     display.synthesis(
@@ -511,7 +503,7 @@ async def run_voice_session(
         routing_reason=summary.get("routing_reason", ""),
     )
 
-    # ── Save to MongoDB ────────────────────────────────────────────────────────
+    #  Save to MongoDB 
     session_doc = {
         "patient_id":           patient_id,
         "session_id":           session_id,
@@ -537,7 +529,7 @@ async def run_voice_session(
     except Exception as exc:
         display.error("MONGO", f"Failed to save summary: {exc}")
 
-    # ── Oversight verification (MongoDB-aware, no backend dependency) ────────────
+    #  Oversight verification (MongoDB-aware, no backend dependency) 
     from ..agents.oversight_core import verify_claim
 
     verify_result = verify_claim(
@@ -562,7 +554,7 @@ async def run_voice_session(
     display.oversight_check(oversight_status, fraud_flags)
     display.decision(oversight_status, reward)
 
-    # ── Speak final summary ────────────────────────────────────────────────────
+    #  Speak final summary 
     tts.speak("Here is your medical summary. " + summary.get("plain_language", ""))
     await loop.run_in_executor(None, tts.wait_until_done)
 
@@ -571,9 +563,7 @@ async def run_voice_session(
     return summary
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CLI entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import sys

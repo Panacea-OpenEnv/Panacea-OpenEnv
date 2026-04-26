@@ -31,7 +31,7 @@ _client  = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 _MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
 console  = Console()
 
-# ── Color map per specialty ────────────────────────────────────────────────────
+#  Color map per specialty 
 _COLORS = [
     "cyan", "green", "yellow", "magenta", "blue",
     "bright_cyan", "bright_green", "bright_yellow", "bright_magenta",
@@ -43,7 +43,7 @@ def _color(specialty: str) -> str:
     return _COLORS[idx]
 
 
-# ── Step 1 — Detect primary specialist from raw complaint ─────────────────────
+#  — Detect primary specialist from raw complaint 
 
 _DETECT_PROMPT = f"""\
 You are a medical triage AI. Given the patient's first complaint, output ONLY JSON:
@@ -87,7 +87,7 @@ async def detect_primary_specialist(complaint: str) -> dict:
     return {"primary_specialist": "General Medicine", "confidence": "low", "reason": "Fallback"}
 
 
-# ── Step 2 — Peer consultation (agent-to-agent, shown on terminal) ────────────
+#  — Peer consultation (agent-to-agent, shown on terminal) 
 
 async def _peer_consult(
     primary: str,
@@ -195,7 +195,7 @@ Each question should be simple, clear, one sentence. Output ONLY a JSON array:
     ]
 
 
-# ── Main council runner ────────────────────────────────────────────────────────
+#  Main council runner 
 
 async def run_council(primary: str, complaint: str) -> dict:
     """
@@ -222,7 +222,7 @@ async def run_council(primary: str, complaint: str) -> dict:
     console.print(Rule(f"[bold white] DOCTOR COUNCIL — Internal Consultation [/]", style="white"))
     console.print(f"  [dim]Patient complaint:[/] {complaint}\n")
 
-    # Step 1 — Primary assessment
+    # — Primary assessment
     console.print(f"  [{primary_color}][{primary_role}][/] forming initial assessment...")
     primary_assessment = await _primary_assessment(primary, complaint)
 
@@ -235,7 +235,7 @@ async def run_council(primary: str, complaint: str) -> dict:
         )
     )
 
-    # Step 2 — Peer consultations
+    # — Peer consultations
     peer_opinions: list[dict] = []
 
     for peer in partners:
@@ -268,7 +268,7 @@ async def run_council(primary: str, complaint: str) -> dict:
 
         await asyncio.sleep(0.1)   # small pause for readability
 
-    # Step 3 — Synthesize patient questions
+    # — Synthesize patient questions
     console.print(f"\n  [{primary_color}][{primary_role}][/] [dim]synthesizing patient questions from council...[/]\n")
     patient_questions = await _synthesize_questions(
         primary, complaint, primary_assessment, peer_opinions

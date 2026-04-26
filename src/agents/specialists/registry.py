@@ -456,9 +456,7 @@ SPECIALISTS: dict[str, dict] = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Symptom → Specialist mappings (used by Router Agent)
-# ─────────────────────────────────────────────────────────────────────────────
 
 SYMPTOM_SPECIALIST_MAP: dict[str, list[str]] = {
     "chest pain":               ["Cardiology", "Pulmonology"],

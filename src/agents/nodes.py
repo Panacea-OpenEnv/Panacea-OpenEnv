@@ -9,9 +9,7 @@ from ..database.mongo_client import get_sync_collection, PATIENTS, VITALS, COMOR
 
 API_URL = "http://localhost:8000"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. Load Pending Claim
-# ─────────────────────────────────────────────────────────────────────────────
+# Load Pending Claim
 
 def load_pending_claim(state: PanaceaState) -> dict:
     try:
@@ -49,9 +47,7 @@ def load_pending_claim(state: PanaceaState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Ghost Patient Check
-# ─────────────────────────────────────────────────────────────────────────────
+# Ghost Patient Check
 
 def check_ghost_patient(state: PanaceaState) -> dict:
     patient_id = state["patient_id"]
@@ -78,9 +74,7 @@ def check_ghost_patient(state: PanaceaState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Primary Verification — Vitals & Severity
-# ─────────────────────────────────────────────────────────────────────────────
+# Primary Verification — Vitals & Severity
 
 def run_primary_verification(state: PanaceaState) -> dict:
     patient_id = state["patient_id"]
@@ -112,9 +106,7 @@ def run_primary_verification(state: PanaceaState) -> dict:
     return updates
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. Comorbidity Deep Check
-# ─────────────────────────────────────────────────────────────────────────────
+# Comorbidity Deep Check
 
 def check_comorbidities(state: PanaceaState) -> dict:
     patient_id = state["patient_id"]
@@ -155,9 +147,7 @@ def check_comorbidities(state: PanaceaState) -> dict:
     return updates
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. Analyze & Decide
-# ─────────────────────────────────────────────────────────────────────────────
+# Analyze & Decide
 
 def analyze_and_decide(state: PanaceaState) -> dict:
     if state["ghost_patient"]:
@@ -216,9 +206,7 @@ def analyze_and_decide(state: PanaceaState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. Submit Decision
-# ─────────────────────────────────────────────────────────────────────────────
+# Submit Decision
 
 def submit_decision(state: PanaceaState) -> dict:
     claim_id = state["claim_id"]
@@ -238,9 +226,7 @@ def submit_decision(state: PanaceaState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. Compute Reward
-# ─────────────────────────────────────────────────────────────────────────────
+# Compute Reward
 
 def compute_reward(state: PanaceaState) -> dict:
     decision = state["final_decision"]
@@ -264,9 +250,7 @@ def compute_reward(state: PanaceaState) -> dict:
     return {"reward": round(reward, 4), "reasoning": [f"[reward] Episode reward: {reward:.4f}."]}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. Log Telemetry
-# ─────────────────────────────────────────────────────────────────────────────
+# Log Telemetry
 
 def log_telemetry(state: PanaceaState) -> dict:
     reasoning_text = " | ".join(state["reasoning"])
