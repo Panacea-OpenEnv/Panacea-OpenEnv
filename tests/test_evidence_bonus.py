@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.environment.reward import compute_reward
 
 
-# ── ghost ────────────────────────────────────────────────────────────────────
+#  ghost 
 
 def test_ghost_evidence_bonus_full():
     """Calling REGISTRY and surfacing 'NO RECORD' → +0.5 bonus."""
@@ -56,7 +56,7 @@ def test_ghost_no_evidence_no_keyword_no_bonus():
     assert abs(r - 1.95) < 1e-6, f"expected 1.95, got {r}"
 
 
-# ── inflation ────────────────────────────────────────────────────────────────
+#  inflation 
 
 def test_inflation_evidence_bonus_full():
     """Calling BILLING and surfacing '<RATIO=' → +0.5 bonus."""
@@ -88,7 +88,7 @@ def test_inflation_wrong_tool_no_bonus():
     assert abs(r - 1.95) < 1e-6, f"expected 1.95, got {r}"
 
 
-# ── masking ──────────────────────────────────────────────────────────────────
+#  masking 
 
 def test_masking_evidence_bonus():
     evidence = {
@@ -106,7 +106,7 @@ def test_masking_evidence_bonus():
     assert abs(r - 2.45) < 1e-6, f"expected 2.45, got {r}"
 
 
-# ── collusion ────────────────────────────────────────────────────────────────
+#  collusion 
 
 def test_collusion_evidence_bonus():
     evidence = {
@@ -123,7 +123,7 @@ def test_collusion_evidence_bonus():
     assert abs(r - 2.45) < 1e-6, f"expected 2.45, got {r}"
 
 
-# ── structured-evidence form ─────────────────────────────────────────────────
+#  structured-evidence form 
 
 def test_structured_evidence_form_works():
     """Form B: tools_called + tool_results dict."""
@@ -139,7 +139,7 @@ def test_structured_evidence_form_works():
     assert abs(r - 2.45) < 1e-6, f"expected 2.45, got {r}"
 
 
-# ── negative cases (clean claims, missed deceptions) ─────────────────────────
+#  negative cases (clean claims, missed deceptions) 
 
 def test_clean_claim_correct_approve():
     r = compute_reward(

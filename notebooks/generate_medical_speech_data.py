@@ -29,11 +29,9 @@ import tempfile
 import threading
 from pathlib import Path
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Medical phrase banks per specialty
 # 20 questions × 26 specialties = 520 base phrases
 # × 5 TTS variants = 2,600 audio files
-# ─────────────────────────────────────────────────────────────────────────────
 
 SPECIALIST_PHRASES: dict[str, list[str]] = {
 
@@ -574,9 +572,7 @@ for _spec in REMAINING_SPECIALTIES:
     ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Audio generation with pyttsx3
-# ─────────────────────────────────────────────────────────────────────────────
 
 TTS_VARIANTS = [
     {"rate": 120, "voice_idx": 0},  # slow, voice 0
@@ -680,14 +676,14 @@ def generate_dataset(
                     "transcript": phrase,
                 })
 
-    # ── Write metadata CSV ─────────────────────────────────────────────────────
+    #  Write metadata CSV 
     meta_path = root / "metadata.csv"
     with open(meta_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=metadata_rows[0].keys())
         writer.writeheader()
         writer.writerows(metadata_rows)
 
-    # ── Summary ────────────────────────────────────────────────────────────────
+    #  Summary 
     train_count = sum(1 for r in metadata_rows if r["split"] == "train")
     val_count   = sum(1 for r in metadata_rows if r["split"] == "val")
 
@@ -702,9 +698,7 @@ def generate_dataset(
     print(f"{'─' * 60}\n")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CLI
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse

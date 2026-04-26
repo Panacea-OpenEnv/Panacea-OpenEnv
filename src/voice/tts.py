@@ -80,7 +80,7 @@ class TTSEngine:
         if self._thread:
             self._thread.join(timeout=3)
 
-    # ── Background worker ─────────────────────────────────────────────────────
+    #  Background worker 
 
     @staticmethod
     def _resolve_voice_id(engine) -> str | None:

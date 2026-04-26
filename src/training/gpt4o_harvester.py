@@ -47,7 +47,7 @@ async def harvest_reports(num_episodes: int = 100, out_path: str = "data/gpt4o_r
             # Determine deception type
             deception = random.choice(["none", "none", "inflation", "collusion", "ghost", "masking"])
             
-            # 1. Generate core report using stream_specialist_response (single-shot)
+            # Generate core report using stream_specialist_response (single-shot)
             spec_name = random.choice(list(SPECIALISTS.keys()))
             vitals = patient.get("vitals", {})
             comorbids = patient.get("comorbidities", [])
@@ -77,7 +77,7 @@ async def harvest_reports(num_episodes: int = 100, out_path: str = "data/gpt4o_r
                 
             reports = [report]
             
-            # 2. Inject deception
+            # Inject deception
             if deception == "ghost":
                 scenario = _inject_ghost()
                 scenario["patient"] = None
@@ -108,7 +108,7 @@ async def harvest_reports(num_episodes: int = 100, out_path: str = "data/gpt4o_r
             reports = scenario["reports"]
             patient_from_db = scenario["patient"]
             
-            # 3. Format prompt exactly as oversight expects
+            # Format prompt exactly as oversight expects
             resource_requests = []
             for r in reports:
                 resource_requests.append({

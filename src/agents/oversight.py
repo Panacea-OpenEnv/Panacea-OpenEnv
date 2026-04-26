@@ -52,10 +52,10 @@ class OversightAgent:
 
         patient_id = claim_event.claimed_state.get("patient_id")
 
-        # 1. Data Gathering from MongoDB (always — provides context for both paths)
+        # Data Gathering from MongoDB (always — provides context for both paths)
         db_data = await self._fetch_db_data(patient_id)
 
-        # 2. Decision Logic
+        # Decision Logic
         from .oversight_core import verify_claim
         claimed = claim_event.claimed_state
         
@@ -75,7 +75,7 @@ class OversightAgent:
 
         print(f"[{self.agent_id}] Finished review. Verdict: {verdict}")
 
-        # 3. Publish Decision
+        # Publish Decision
         decision_event = VerificationDecisionEvent(
             agent_id=self.agent_id,
             target_action_id=claim_event.event_id,
@@ -84,7 +84,7 @@ class OversightAgent:
         )
         await event_bus.publish(decision_event)
 
-    # ── Data fetch ────────────────────────────────────────────────────────────
+    #  Data fetch 
 
     async def _fetch_db_data(self, patient_id: str) -> dict:
         """Fetch patient data from MongoDB for verification."""

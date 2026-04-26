@@ -147,7 +147,7 @@ def _extract_structured(text: str) -> dict | None:
     return None
 
 
-# ── Patient reply queue (shared with voice pipeline) ─────────────────────────
+#  Patient reply queue (shared with voice pipeline) 
 _intake_reply_queue: asyncio.Queue = asyncio.Queue()
 
 async def _wait_for_patient_reply() -> str:

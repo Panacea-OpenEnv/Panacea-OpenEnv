@@ -23,9 +23,7 @@ from .specialists.registry import (
 BACKEND_URL = "http://localhost:8000"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Patient intake — fetch DB record and enrich state
-# ─────────────────────────────────────────────────────────────────────────────
 
 def patient_intake(state: HospitalState) -> dict:
     """
@@ -70,9 +68,7 @@ def patient_intake(state: HospitalState) -> dict:
     return updates
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Core routing logic
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _specialists_for_symptoms(symptoms: list[str]) -> list[str]:
     matched: list[str] = []
@@ -143,9 +139,7 @@ def triage_router(state: HospitalState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Inter-agent message helpers (used by specialist nodes)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_message(
     from_specialist: str,

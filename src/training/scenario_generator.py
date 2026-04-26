@@ -23,7 +23,7 @@ from typing import Literal
 # Reuse existing project components — no duplication
 from ..agents.specialists.registry import SPECIALISTS, get_specialist
 
-# ── Patient & clinical data pools ────────────────────────────────────────────
+#  Patient & clinical data pools 
 
 FIRST_NAMES = [
     "Arjun", "Priya", "Rohit", "Sneha", "Vikram", "Ananya", "Suresh",
@@ -63,7 +63,7 @@ COLLUSION_DRUGS = [
 DeceptionType = Literal["ghost", "inflation", "masking", "collusion", "none"]
 
 
-# ── Patient generator ────────────────────────────────────────────────────────
+#  Patient generator 
 
 def _generate_patient(patient_id: str) -> dict:
     """Generate a realistic patient record."""
@@ -89,7 +89,7 @@ def _generate_patient(patient_id: str) -> dict:
     }
 
 
-# ── Static report templates (difficulty=1, no API calls) ─────────────────────
+#  Static report templates (difficulty=1, no API calls) 
 
 def _generate_static_report(spec_name: str, patient: dict, complaint: str) -> dict:
     """Generate a template-based specialist report. Fast, no API cost."""
@@ -126,7 +126,7 @@ def _generate_static_report(spec_name: str, patient: dict, complaint: str) -> di
     }
 
 
-# ── Deception injectors ──────────────────────────────────────────────────────
+#  Deception injectors 
 
 def _inject_ghost() -> dict:
     """Ghost patient: fabricated ID, all reports are fake."""
@@ -265,7 +265,7 @@ def _inject_collusion(patient: dict, reports: list[dict]) -> dict:
     }
 
 
-# ── Main generator class ─────────────────────────────────────────────────────
+#  Main generator class 
 
 class ScenarioGenerator:
     """
@@ -351,7 +351,7 @@ class ScenarioGenerator:
         random.seed(seed)
         return [self.generate(difficulty=difficulty) for _ in range(n)]
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    #  Internal helpers 
 
     def _pick_deception(self, difficulty: int) -> DeceptionType:
         """Select deception type based on difficulty curriculum."""
@@ -460,7 +460,7 @@ class ScenarioGenerator:
         )
 
 
-# ── Quick CLI test ────────────────────────────────────────────────────────────
+#  Quick CLI test 
 
 if __name__ == "__main__":
     gen = ScenarioGenerator(seed=42)

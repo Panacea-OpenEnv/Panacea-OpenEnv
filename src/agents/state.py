@@ -10,7 +10,7 @@ class PanaceaState(TypedDict):
     so parallel or sequential nodes can contribute entries without clobbering each other.
     """
 
-    # ── Claim intake ──────────────────────────────────────────────────────────
+    #  Claim intake 
     claim_id: int
     patient_id: str
     department: str
@@ -18,31 +18,31 @@ class PanaceaState(TypedDict):
     claimed_amount: float
     proposed_claim: dict          # Raw dict as received from the sub-agent
 
-    # ── SQL verification trail ────────────────────────────────────────────────
+    #  SQL verification trail 
     sql_queries: Annotated[list, operator.add]    # Every query the agent issued
     query_results: Annotated[list, operator.add]  # Corresponding results/errors
 
-    # ── Schema drift tracking ─────────────────────────────────────────────────
+    #  Schema drift tracking 
     schema_error_count: int       # How many ProgrammingErrors encountered this episode
     schema_adapted: bool          # True once the agent successfully recovered via information_schema
     known_tables: list            # Discovered table names after schema probe
 
-    # ── Proactive check flags ─────────────────────────────────────────────────
+    #  Proactive check flags 
     ghost_patient: bool           # True if patient_id not found in registry
     comorbidities_checked: bool   # True once proactive comorbidity scan ran
 
-    # ── Analysis outputs ──────────────────────────────────────────────────────
+    #  Analysis outputs 
     deception_detected: bool
     deception_type: str           # "none" | "ghost" | "inflation" | "masking" | "collusion"
     claimed_severity: float       # Severity implied by sub-agent's claim
     actual_severity: float        # Ground-truth severity from DB
 
-    # ── Decision ──────────────────────────────────────────────────────────────
+    #  Decision 
     verification_status: str      # "pending" | "verified_clean" | "deception_detected" | "cannot_verify"
     final_decision: str           # "APPROVED" | "REJECTED" | "PENDING"
     reasoning: Annotated[list, operator.add]  # Human-readable audit chain
 
-    # ── Reward & telemetry ────────────────────────────────────────────────────
+    #  Reward & telemetry 
     reward: float
     step_count: int
 

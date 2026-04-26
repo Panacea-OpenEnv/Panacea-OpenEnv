@@ -30,9 +30,7 @@ BACKEND_URL = "http://localhost:8000"
 MAX_CONSULTATION_ROUNDS = 2
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Specialist node — runs for each specialist dispatched via Send
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _query_db(sql: str) -> list[dict]:
     """Helper: run a read-only SQL query against the backend."""
@@ -58,7 +56,7 @@ def _assess_patient(state: HospitalState, spec_name: str, spec_data: dict) -> di
     symptoms = state.get("symptoms") or []
     urgency = state.get("urgency", "medium")
 
-    # ── 1. Identify which of this specialist's conditions the patient has ──
+    #  Identify which of this specialist's conditions the patient has 
     specialty_conditions = spec_data["conditions"]
     matched_conditions = [
         c for c in conditions
@@ -66,13 +64,13 @@ def _assess_patient(state: HospitalState, spec_name: str, spec_data: dict) -> di
            or any(sc in c.lower().replace(" ", "_") for sc in specialty_conditions)
     ]
 
-    # ── 2. Query relevant vitals from DB ──
+    #  Query relevant vitals from DB 
     vitals_rows = _query_db(
         f"SELECT * FROM vitals WHERE patient_id = '{patient_id}' LIMIT 1"
     )
     vitals = vitals_rows[0] if vitals_rows else {}
 
-    # ── 3. Determine severity score (0.0–1.0) ──
+    #  Determine severity score (0.0–1.0) 
     base_severity = len(matched_conditions) * 0.2 + (0.3 if urgency == "critical" else 0.1)
     severity = min(base_severity, 1.0)
     severity_label = (
@@ -82,12 +80,12 @@ def _assess_patient(state: HospitalState, spec_name: str, spec_data: dict) -> di
         else "mild"
     )
 
-    # ── 4. Select resources to request (scale with severity) ──
+    #  Select resources to request (scale with severity) 
     available_resources = spec_data["resources"]
     n_resources = max(1, int(len(available_resources) * severity))
     requested_resources = available_resources[:n_resources]
 
-    # ── 5. Decide which consultations to request ──
+    #  Decide which consultations to request 
     consultation_requests: list[str] = []
     completed = set(state.get("completed_specialists") or [])
     already_active = set(state.get("active_specialists") or [])
@@ -98,13 +96,13 @@ def _assess_patient(state: HospitalState, spec_name: str, spec_data: dict) -> di
             if partner not in completed and partner not in already_active:
                 consultation_requests.append(partner)
 
-    # ── 6. Read messages from other agents directed to this specialist ──
+    #  Read messages from other agents directed to this specialist 
     incoming = get_messages_for(spec_name, state.get("inter_agent_messages") or [])
     incoming_summary = (
         f"; received {len(incoming)} inter-agent message(s)" if incoming else ""
     )
 
-    # ── 7. Build outgoing inter-agent messages ──
+    #  Build outgoing inter-agent messages 
     outgoing_messages: list[dict] = []
     if matched_conditions and severity >= 0.5:
         for partner in spec_data["consultation_partners"][:1]:
@@ -119,7 +117,7 @@ def _assess_patient(state: HospitalState, spec_name: str, spec_data: dict) -> di
                 ),
             ))
 
-    # ── 8. Build the report dict ──
+    #  Build the report dict 
     report = {
         "specialist": spec_name,
         "role": spec_data["role"],
@@ -183,9 +181,7 @@ def run_specialist(state: HospitalState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Treatment plan synthesizer
-# ─────────────────────────────────────────────────────────────────────────────
 
 def synthesize_treatment_plan(state: HospitalState) -> dict:
     """
@@ -242,9 +238,7 @@ def synthesize_treatment_plan(state: HospitalState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Oversight verifier
-# ─────────────────────────────────────────────────────────────────────────────
 
 def oversight_verify(state: HospitalState) -> dict:
     """
@@ -275,9 +269,7 @@ def oversight_verify(state: HospitalState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Final decision
-# ─────────────────────────────────────────────────────────────────────────────
 
 def final_decision(state: HospitalState) -> dict:
     """Compute reward and write final summary to reasoning trail."""
@@ -301,9 +293,7 @@ def final_decision(state: HospitalState) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Conditional edge functions
-# ─────────────────────────────────────────────────────────────────────────────
 
 def dispatch_to_specialists(state: HospitalState) -> list[Send]:
     """
@@ -349,9 +339,7 @@ def dispatch_consultations(state: HospitalState) -> list[Send] | str:
     return "synthesize_treatment_plan"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Graph assembly
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_hospital_graph() -> StateGraph:
     graph = StateGraph(HospitalState)
@@ -398,9 +386,7 @@ def build_hospital_graph() -> StateGraph:
 hospital_app = build_hospital_graph().compile()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Episode runner
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run_hospital_episode(
     patient_id: str = "P1001",

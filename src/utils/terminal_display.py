@@ -22,7 +22,7 @@ if sys.platform == "win32":
 
 console = Console(force_terminal=True, legacy_windows=False)
 
-# ── Color scheme per actor ────────────────────────────────────────────────────
+#  Color scheme per actor 
 COLORS = {
     "router":       "bold cyan",
     "specialist":   "bold green",
@@ -172,7 +172,7 @@ class PanaceaDisplay:
             box=box.DOUBLE,
         ))
 
-    # ── Training-specific display ─────────────────────────────────────────────
+    #  Training-specific display 
 
     def training_header(self, total_episodes: int):
         console.print()
@@ -298,5 +298,5 @@ class PanaceaDisplay:
         console.print(f"[{_ts()}] [{COLORS['system']}]INFO              [/] {msg}")
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
+#  Singleton 
 display = PanaceaDisplay()

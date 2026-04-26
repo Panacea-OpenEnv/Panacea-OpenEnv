@@ -26,11 +26,11 @@ def verify_claim(
     claimed_comorbidities = claimed_comorbidities or []
     drug_conflicts = drug_conflicts or []
 
-    # 1. Ghost patient check
+    # Ghost patient check
     if patient_from_db is None and not db_comorbidities:
         fraud_flags.append(f"GHOST_PATIENT: {patient_id} not found in registry")
 
-    # 2. Duplicate resource detection across specialists
+    # Duplicate resource detection across specialists
     resource_claim_count = {}
     for req in resource_requests:
         for res in req.get("resources", []):
@@ -40,7 +40,7 @@ def verify_claim(
         if len(claimants) > 1:
             fraud_flags.append(f"DUPLICATE_CLAIM: '{resource}' claimed by {claimants} — possible collusion")
 
-    # 3. Collusion detection — same medication prescribed by 2+ specialists
+    # Collusion detection — same medication prescribed by 2+ specialists
     med_prescribers = {}
     for r in reports:
         spec = r.get("specialty", r.get("specialist", "unknown"))
@@ -52,15 +52,15 @@ def verify_claim(
         if len(prescribers) >= 2:
             fraud_flags.append(f"COLLUSION: '{med}' prescribed by {prescribers}")
 
-    # 4. Drug conflict check (passed from voice pipeline synthesis)
+    # Drug conflict check (passed from voice pipeline synthesis)
     fraud_flags.extend(drug_conflicts)
 
-    # 5. Severity inflation — if 3+ specialists all report critical
+    # Severity inflation — if 3+ specialists all report critical
     critical_count = sum(1 for r in reports if r.get("severity") == "critical" or r.get("severity_label") == "critical")
     if critical_count >= 3:
         fraud_flags.append(f"SEVERITY_INFLATION: {critical_count} specialists all report critical")
 
-    # 6. Masking check (comorbidities omitted)
+    # Masking check (comorbidities omitted)
     critical_found = [
         c for c in db_comorbidities
         if c.get("is_critical") and c.get("condition") not in str(claimed_comorbidities)
@@ -75,7 +75,7 @@ def verify_claim(
             fraud_flags.append("masking")
             fraud_flags.append("MASKING: Critical state mismatch detected between true and claimed state.")
 
-    # 7. RL model augmentation
+    # RL model augmentation
     rl_reasoning = ""
     if os.getenv("OVERSIGHT_ENDPOINT"):
         from ..inference.inference_server import query_oversight_model_sync

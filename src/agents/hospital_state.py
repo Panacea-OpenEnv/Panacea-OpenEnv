@@ -3,7 +3,7 @@ import operator
 
 
 class HospitalState(TypedDict):
-    # ── Patient context ───────────────────────────────────────────────────────
+    #  Patient context 
     patient_id: str
     patient_name: str
     age: int
@@ -12,7 +12,7 @@ class HospitalState(TypedDict):
     urgency: str            # "critical" | "high" | "medium" | "low"
     patient_db_record: dict
 
-    # ── Routing & dispatch ────────────────────────────────────────────────────
+    #  Routing & dispatch 
     # All list fields use operator.add so parallel Send nodes don't clobber each other
     active_specialists: Annotated[list[str], operator.add]
     completed_specialists: Annotated[list[str], operator.add]
@@ -20,20 +20,20 @@ class HospitalState(TypedDict):
     consultation_round: int
     current_specialist: str     # injected by Send; tells run_specialist who it is
 
-    # ── Cross-agent communication (append-only) ───────────────────────────────
+    #  Cross-agent communication (append-only) 
     specialist_reports: Annotated[list[dict], operator.add]
     consultation_results: Annotated[list[dict], operator.add]
     inter_agent_messages: Annotated[list[dict], operator.add]
     resource_requests: Annotated[list[dict], operator.add]
 
-    # ── Treatment synthesis ───────────────────────────────────────────────────
+    #  Treatment synthesis 
     treatment_plan: dict
 
-    # ── Oversight ─────────────────────────────────────────────────────────────
+    #  Oversight 
     oversight_decision: str     # "APPROVED" | "REJECTED" | "PARTIAL" | "PENDING"
     fraud_flags: Annotated[list[str], operator.add]
 
-    # ── Audit trail ───────────────────────────────────────────────────────────
+    #  Audit trail 
     # step_count uses operator.add so parallel Send nodes can each contribute +1
     reasoning: Annotated[list[str], operator.add]
     reward: float

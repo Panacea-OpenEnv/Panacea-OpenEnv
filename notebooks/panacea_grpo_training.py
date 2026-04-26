@@ -22,9 +22,7 @@ Paste each CELL block into a separate Colab cell and run top-to-bottom.
 Runtime: GPU (T4 free tier sufficient for the 1.5B model).
 """
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 1 — Install dependencies
-# ══════════════════════════════════════════════════════════════════════════════
 # Paste and run this cell first. ~3 minutes on a fresh runtime.
 
 """
@@ -33,9 +31,7 @@ Runtime: GPU (T4 free tier sufficient for the 1.5B model).
 """
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 2 — Shared utilities (no external imports)
-# ══════════════════════════════════════════════════════════════════════════════
 
 import os
 import re
@@ -84,7 +80,7 @@ def extract_tools_called(text: str) -> list[str]:
     return [m.group(1).upper() for m in _TOOL_TAG_RE.finditer(text)]
 
 
-# ── Tool-call cost table (matches src/environment/tool_backends.py) ──────────
+#  Tool-call cost table (matches src/environment/tool_backends.py) 
 
 TOOL_COSTS: dict[str, float] = {
     "TOOL_REGISTRY": -0.15,   # base -0.10 + latency -0.05
@@ -96,7 +92,7 @@ TOOL_COSTS: dict[str, float] = {
 REPEAT_TOOL_PENALTY = -0.05
 
 
-# ── Evidence-grounded reward (mirrors src/environment/reward.py) ─────────────
+#  Evidence-grounded reward (mirrors src/environment/reward.py) 
 
 _PRIMARY_TOOL = {
     "ghost": "TOOL_REGISTRY", "inflation": "TOOL_BILLING",
@@ -205,9 +201,7 @@ def run_inference(model, tokenizer, prompt: str) -> str:
 print("Cell 2 ready.")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 3 — Load model with Unsloth
-# ══════════════════════════════════════════════════════════════════════════════
 
 def load_model():
     from unsloth import FastLanguageModel
@@ -237,58 +231,7 @@ def load_model():
 model, tokenizer = load_model()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CELL 3.5 — Baseline eval BEFORE training (snapshot the untrained model)
-# ══════════════════════════════════════════════════════════════════════════════
-# We need the dataset loaded first, so this actually runs after CELL 4.
-# It saves baseline_eval.json which the after-training comparison will read.
-
-def evaluate_per_type(model, tokenizer, dataset, n_per_type: int = 20, tag: str = "baseline"):
-    """Per-deception-type accuracy + mean reward. Returns a dict that
-    plot_before_after() consumes. Saves to {tag}_eval.json."""
-    test = dataset["test"]
-    by_type: dict[str, list[int]] = {}
-    rewards_by_type: dict[str, list[float]] = {}
-    tools_by_type: dict[str, Counter] = {}
-
-    for ex in test:
-        dtype = ex["deception_type"]
-        by_type.setdefault(dtype, [])
-        rewards_by_type.setdefault(dtype, [])
-        tools_by_type.setdefault(dtype, Counter())
-        if len(by_type[dtype]) >= n_per_type:
-            continue
-
-        response = run_inference(model, tokenizer, ex["prompt"])
-        verdict  = parse_verdict(response)
-        correct  = (verdict is not None) and (verdict == ex["expected_verdict"])
-        by_type[dtype].append(1 if correct else 0)
-
-        acc_r  = compute_accuracy_reward(verdict or "", ex["expected_verdict"], dtype, response)
-        cost_r = replay_tool_costs(response)
-        rewards_by_type[dtype].append(acc_r + cost_r)
-        tools_by_type[dtype].update(extract_tools_called(response))
-
-    summary = {
-        "tag": tag,
-        "accuracy_per_type":     {k: (sum(v)/len(v) if v else 0.0) for k, v in by_type.items()},
-        "mean_reward_per_type":  {k: (sum(v)/len(v) if v else 0.0) for k, v in rewards_by_type.items()},
-        "n_per_type":            {k: len(v) for k, v in by_type.items()},
-        "tool_calls_per_type":   {k: dict(v) for k, v in tools_by_type.items()},
-    }
-    out_path = f"./panacea_grpo_out/{tag}_eval.json"
-    os.makedirs("./panacea_grpo_out", exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    print(f"\n[{tag}] per-type accuracy: " +
-          ", ".join(f"{k}={v*100:.0f}%" for k, v in summary['accuracy_per_type'].items()))
-    print(f"[{tag}] saved -> {out_path}")
-    return summary
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 4 — Load POMDP trajectory dataset
-# ══════════════════════════════════════════════════════════════════════════════
 # Expects data/pomdp_trajectories.jsonl produced by:
 #   python -m src.training.trajectory_harvester --n 1500 --difficulty 3
 # Each line: {prompt, response, ground_truth_label, deception_type, total_reward, tool_cost_total}
@@ -340,14 +283,12 @@ dataset = build_dataset_from_jsonl("data/pomdp_trajectories.jsonl")
 # (evaluate_per_type is still available if you want to run it manually after training)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 5 — Reward functions
-# ══════════════════════════════════════════════════════════════════════════════
 # Three reward functions (composed by GRPO):
-#   1. tool_trace_reward_fn — accuracy + evidence + replayed tool costs
+#   tool_trace_reward_fn — accuracy + evidence + replayed tool costs
 #                             (matches PanaceaPOMDPEnv.step exactly)
-#   2. format_reward_fn     — small bonus for valid VERDICT/REASONING tags
-#   3. tool_use_reward_fn   — small bonus for calling at least one tool
+#   format_reward_fn     — small bonus for valid VERDICT/REASONING tags
+#   tool_use_reward_fn   — small bonus for calling at least one tool
 #                             (encourages investigation over guessing)
 
 def make_reward_fns():
@@ -398,9 +339,9 @@ def make_reward_fns():
 tool_trace_reward_fn, format_reward_fn, tool_use_reward_fn = make_reward_fns()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CELL 6 — evaluate() helper (run_inference defined above near model load)
-# ══════════════════════════════════════════════════════════════════════════════
+# CELL 6 — SFT warm-up (teach the <tool>X</tool> format)
+# 50 SFT steps before GRPO so the model can already emit a structured trajectory.
+# Without this warm-up, GRPO often spends 200+ steps just discovering the format.
 
 
 def evaluate(model, tokenizer, dataset, n_samples: int = 50):
@@ -451,9 +392,7 @@ def evaluate(model, tokenizer, dataset, n_samples: int = 50):
     return summary, tools_per_type
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 7 — GRPO training on POMDP trajectories
-# ══════════════════════════════════════════════════════════════════════════════
 
 def train(model, tokenizer, dataset):
     from trl import GRPOTrainer, GRPOConfig
@@ -566,9 +505,36 @@ def save_training_metrics(trainer, out_dir: str = "./panacea_grpo_out"):
 trainer = train(model, tokenizer, dataset)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# CELL 8 — Inference helper
+
+def run_inference(model, tokenizer, prompt: str) -> str:
+    """Run the trained model on a single prompt string."""
+    import torch
+    from unsloth import FastLanguageModel
+    FastLanguageModel.for_inference(model)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": prompt},
+    ]
+    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens = 384,
+            temperature    = 0.2,
+            top_p          = 0.9,
+            do_sample      = True,
+            pad_token_id   = tokenizer.eos_token_id,
+        )
+
+    new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+
 # CELL 9 — Evaluate + curriculum drift chart
-# ══════════════════════════════════════════════════════════════════════════════
 
 def plot_baseline_vs_trained(baseline: dict, trained: dict, out_path: str = "panacea_grpo_out/baseline_vs_trained.png"):
     """Side-by-side bar chart of headline metrics, baseline vs trained."""
@@ -706,9 +672,7 @@ plot_before_after()
 plot_curriculum_drift()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # CELL 10 — Export & serve with ngrok
-# ══════════════════════════════════════════════════════════════════════════════
 
 def export_and_serve(model, tokenizer, ngrok_token: str = "", hf_repo: str = ""):
     """

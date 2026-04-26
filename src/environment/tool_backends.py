@@ -14,7 +14,7 @@ the theme is asking for.
 import random
 from typing import Optional
 
-# ── Backend metadata ─────────────────────────────────────────────────────────
+#  Backend metadata 
 
 TOOL_BACKENDS: dict[str, dict] = {
     "TOOL_REGISTRY": {
@@ -70,8 +70,7 @@ def _rand() -> random.Random:
     return random
 
 
-# ── Per-tool view formatters ─────────────────────────────────────────────────
-#
+#  Per-tool view formatters 
 # Each formatter takes the raw `episode` dict (from ScenarioGenerator) and
 # returns the partial view that THIS app would expose. Different schemas on
 # purpose — the agent has to integrate heterogeneous evidence.

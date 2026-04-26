@@ -24,7 +24,7 @@ Estimated time:
   CPU smoke-test (3 examples) — ~5 min
 """
 
-# ── Cell 1: Imports ───────────────────────────────────────────────────────────
+#  Cell 1: Imports 
 # %%
 import os
 import csv
@@ -49,7 +49,7 @@ print(f"PyTorch  : {torch.__version__}")
 print(f"Device   : {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
 
-# ── Cell 2: Config ────────────────────────────────────────────────────────────
+#  Cell 2: Config 
 # %%
 @dataclass
 class Config:
@@ -82,7 +82,7 @@ class Config:
 cfg = Config()
 
 
-# ── Cell 3: Load and validate metadata ────────────────────────────────────────
+#  Cell 3: Load and validate metadata 
 # %%
 def load_metadata(data_dir: str, smoke_test: bool = False) -> tuple[list[dict], list[dict]]:
     """Read metadata.csv and return (train_rows, val_rows)."""
@@ -121,7 +121,7 @@ def load_metadata(data_dir: str, smoke_test: bool = False) -> tuple[list[dict], 
 train_rows, val_rows = load_metadata(cfg.data_dir, smoke_test=cfg.smoke_test)
 
 
-# ── Cell 4: Build HuggingFace Dataset ────────────────────────────────────────
+#  Cell 4: Build HuggingFace Dataset 
 # %%
 def rows_to_dataset(rows: list[dict]) -> Dataset:
     return Dataset.from_dict({
@@ -138,7 +138,7 @@ dataset = DatasetDict({
 print(dataset)
 
 
-# ── Cell 5: Load Whisper processor ────────────────────────────────────────────
+#  Cell 5: Load Whisper processor 
 # %%
 processor = WhisperProcessor.from_pretrained(
     cfg.base_model,
@@ -148,7 +148,7 @@ processor = WhisperProcessor.from_pretrained(
 print(f"Processor loaded: {cfg.base_model}")
 
 
-# ── Cell 6: Feature extraction ────────────────────────────────────────────────
+#  Cell 6: Feature extraction 
 # %%
 def prepare_dataset(batch: dict) -> dict:
     """
@@ -175,7 +175,7 @@ dataset = dataset.map(
 print("Feature extraction complete.")
 
 
-# ── Cell 7: Data collator ─────────────────────────────────────────────────────
+#  Cell 7: Data collator 
 # %%
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
@@ -207,7 +207,7 @@ data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 print("Data collator ready.")
 
 
-# ── Cell 8: Metrics ───────────────────────────────────────────────────────────
+#  Cell 8: Metrics 
 # %%
 wer_metric = evaluate.load("wer")
 
@@ -229,7 +229,7 @@ def compute_metrics(pred) -> dict:
 print("WER metric loaded.")
 
 
-# ── Cell 9: Load Whisper model ────────────────────────────────────────────────
+#  Cell 9: Load Whisper model 
 # %%
 model = WhisperForConditionalGeneration.from_pretrained(cfg.base_model)
 
@@ -250,7 +250,7 @@ n_params = sum(p.numel() for p in model.parameters()) / 1e6
 print(f"Model: {cfg.base_model} ({n_params:.1f}M parameters)")
 
 
-# ── Cell 10: Training arguments ───────────────────────────────────────────────
+#  Cell 10: Training arguments 
 # %%
 max_steps = 20 if cfg.smoke_test else cfg.max_steps
 
@@ -285,7 +285,7 @@ print(f"Training for {max_steps} steps")
 print(f"FP16: {cfg.fp16} | Device: {'GPU' if cfg.fp16 else 'CPU'}")
 
 
-# ── Cell 11: Trainer ──────────────────────────────────────────────────────────
+#  Cell 11: Trainer 
 # %%
 trainer = Seq2SeqTrainer(
     model           = model,
@@ -301,19 +301,19 @@ print("Trainer ready. Starting fine-tuning...")
 print("─" * 60)
 
 
-# ── Cell 12: Train ────────────────────────────────────────────────────────────
+#  Cell 12: Train 
 # %%
 trainer.train()
 print("Training complete!")
 
 
-# ── Cell 13: Evaluate ─────────────────────────────────────────────────────────
+#  Cell 13: Evaluate 
 # %%
 eval_results = trainer.evaluate()
 print(f"\nFinal WER: {eval_results['eval_wer']:.2f}%")
 
 
-# ── Cell 14: Save locally ─────────────────────────────────────────────────────
+#  Cell 14: Save locally 
 # %%
 local_save = Path(cfg.output_dir) / "final"
 trainer.save_model(str(local_save))
@@ -321,7 +321,7 @@ processor.save_pretrained(str(local_save))
 print(f"Model saved locally → {local_save}")
 
 
-# ── Cell 15: Push to HuggingFace Hub (optional) ───────────────────────────────
+#  Cell 15: Push to HuggingFace Hub (optional) 
 # %%
 if cfg.hub_model:
     print(f"Pushing to HuggingFace Hub: {cfg.hub_model}")
@@ -342,7 +342,7 @@ else:
     print(f"  WHISPER_MODEL = '{local_save}'")
 
 
-# ── Cell 16: Quick inference test ─────────────────────────────────────────────
+#  Cell 16: Quick inference test 
 # %%
 def transcribe_sample(audio_path: str) -> str:
     """Test the fine-tuned model on a single WAV file."""
@@ -363,9 +363,7 @@ if sample_path and Path(sample_path).exists():
     print(f"  Reference : {ref}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # CLI — run as plain script with --smoke-test flag
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse, sys

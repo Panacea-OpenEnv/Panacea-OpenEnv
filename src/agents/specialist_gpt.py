@@ -26,7 +26,7 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL  = os.getenv("OPENAI_MODEL", "gpt-4o")
 MAX_TURNS = int(os.getenv("MAX_SPECIALIST_TURNS", "5"))
 
-# ── System prompt builder ─────────────────────────────────────────────────────
+#  System prompt builder 
 
 def build_system_prompt(
     spec_name: str,
@@ -104,7 +104,7 @@ INSTRUCTIONS:
 Start by warmly greeting the patient and asking your first most important question."""
 
 
-# ── Streaming specialist conversation ─────────────────────────────────────────
+#  Streaming specialist conversation 
 
 async def stream_specialist_response(
     messages: list[dict],
@@ -158,7 +158,7 @@ async def run_specialist_consultation(
     Returns:
         dict with full conversation, diagnosis, medications
     """
-    # ── Load patient context from MongoDB or override ────────────────────────
+    #  Load patient context from MongoDB or override 
     if patient_override:
         patient   = patient_override.get("patient", {})
         vitals    = patient_override.get("vitals", {})
@@ -185,7 +185,7 @@ async def run_specialist_consultation(
     spec_data = get_specialist(spec_name)
 
     for turn in range(MAX_TURNS):
-        # ── GPT-4o streams response ───────────────────────────────────────────
+        #  GPT-4o streams response 
         response_text = await stream_specialist_response(messages, on_token=on_token)
 
         conversation.append({
@@ -204,13 +204,13 @@ async def run_specialist_consultation(
 
         messages.append({"role": "assistant", "content": response_text})
 
-        # ── Check if specialist is done (returned JSON with ready:true) ───────
+        #  Check if specialist is done (returned JSON with ready:true) 
         assessment = _extract_assessment(response_text)
         if assessment and assessment.get("ready"):
             final_assessment = assessment
             break
 
-        # ── Get patient reply (from voice pipeline or simulated) ─────────────
+        #  Get patient reply (from voice pipeline or simulated) 
         if voice_mode:
             # Voice pipeline injects real patient speech via inject_patient_reply()
             patient_reply = await _wait_for_patient_reply()
@@ -224,7 +224,7 @@ async def run_specialist_consultation(
         })
         messages.append({"role": "user", "content": patient_reply})
 
-    # ── Build report document ─────────────────────────────────────────────────
+    #  Build report document 
     report = {
         "session_id":   session_id,
         "patient_id":   patient_id,
@@ -244,7 +244,7 @@ async def run_specialist_consultation(
     return report
 
 
-# ── Patient reply queue (used in voice pipeline mode) ────────────────────────
+#  Patient reply queue (used in voice pipeline mode) 
 _patient_reply_queue: asyncio.Queue = asyncio.Queue()
 
 async def _wait_for_patient_reply() -> str:
@@ -256,7 +256,7 @@ async def inject_patient_reply(text: str):
     await _patient_reply_queue.put(text)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+#  Helpers 
 
 def _extract_assessment(text: str) -> dict | None:
     """Parse JSON assessment block from GPT-4o response if present.
@@ -284,7 +284,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ── Quick test (no voice, no MongoDB needed) ──────────────────────────────────
+#  Quick test (no voice, no MongoDB needed) 
 
 async def _test():
     print(f"\nTesting GPT-4o specialist: Cardiology")

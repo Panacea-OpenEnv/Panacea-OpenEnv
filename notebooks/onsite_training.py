@@ -1,10 +1,7 @@
 # %% [markdown]
 # # Project Panacea: RL Training Pipeline (OpenEnv + Unsloth + TRL)
-# 
 # **Objective:** Train an Oversight LLM Agent natively inside the Panacea environment to mathematically verify sub-agent requests, catching obfuscated comorbidities and schema drift.
-# 
 # **Stack:** `Unsloth` (4-bit QLoRA) + `TRL` (PPOTrainer) + `OpenEnv` (Gymnasium)
-# 
 # ---
 
 # %% [markdown]
@@ -35,7 +32,7 @@ print("Loading Unsloth Base Model (4-bit)...")
 max_seq_length = 2048 # Adjust based on DB schema sizes
 model_name = "unsloth/llama-3-8b-Instruct-bnb-4bit"
 
-# 1. Load the base causal LM
+# Load the base causal LM
 base_model, tokenizer = FastLanguageModel.from_pretrained(
     model_name = model_name,
     max_seq_length = max_seq_length,
@@ -43,7 +40,7 @@ base_model, tokenizer = FastLanguageModel.from_pretrained(
     load_in_4bit = True,
 )
 
-# 2. Add LoRA Adapters for efficient fine-tuning
+# Add LoRA Adapters for efficient fine-tuning
 base_model = FastLanguageModel.get_peft_model(
     base_model,
     r = 16,
@@ -54,7 +51,7 @@ base_model = FastLanguageModel.get_peft_model(
     use_gradient_checkpointing = "unsloth",
 )
 
-# 3. Wrap with TRL's ValueHead for PPO
+# Wrap with TRL's ValueHead for PPO
 # Note: PPOTrainer requires a Value Head to predict advantage (V-function).
 rl_model = AutoModelForCausalLMWithValueHead.from_pretrained(base_model)
 rl_model.is_peft_model = True # Important for TRL integration
@@ -159,17 +156,17 @@ for episode in range(num_episodes):
     response_tensors = []
     rewards = []
     
-    # 1. Format State
+    # Format State
     prompt_text = env_wrapper.generate_prompt(obs)
     q_tensor = tokenizer.encode(prompt_text, return_tensors="pt").to(ppo_trainer.accelerator.device)[0]
     
-    # 2. Generate Action (Trajectory Collection)
+    # Generate Action (Trajectory Collection)
     with torch.no_grad():
         r_tensor = ppo_trainer.generate(q_tensor.unsqueeze(0), **generation_kwargs)[0]
     
     response_text = tokenizer.decode(r_tensor, skip_special_tokens=True)
     
-    # 3. Environment Step
+    # Environment Step
     action = env_wrapper.decode_action(response_text)
     
     # Send action back to Panacea OpenEnv
@@ -181,7 +178,7 @@ for episode in range(num_episodes):
         
     reward_tensor = torch.tensor([reward], dtype=torch.float32).to(ppo_trainer.accelerator.device)
     
-    # 4. PPO Update Step
+    # PPO Update Step
     stats = ppo_trainer.step([q_tensor], [r_tensor], [reward_tensor])
     
     reward_history.append(reward)

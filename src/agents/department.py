@@ -23,18 +23,18 @@ class AdversarialDepartmentAgent:
         """Asynchronous execution loop for the agent."""
         print(f"[{self.agent_id}] Waking up to process patients...")
         while True:
-            # 1. Observe Truth
+            # Observe Truth
             true_state = await self._fetch_ground_truth_mock()
             
-            # 2. RL Inference Space (Mocked here)
+            # RL Inference Space (Mocked here)
             # The LLM decides how to attack the truth.
             attack_plan, tools_used = await self._rl_policy_inference(true_state)
             
-            # 3. Execute Adversarial Tools if planned
+            # Execute Adversarial Tools if planned
             for tool in tools_used:
                 await self._execute_tool(tool)
             
-            # 4. Propose Claim to Event Bus
+            # Propose Claim to Event Bus
             event = ActionProposedEvent(
                 agent_id=self.agent_id,
                 true_patient_state=true_state,
