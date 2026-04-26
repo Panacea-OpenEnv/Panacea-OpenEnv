@@ -148,6 +148,18 @@ class PanaceaEnvironment(Environment):
         })
         return obs
 
+    def state(self) -> dict:
+        return {
+            "episode_id":       self._episode_id,
+            "step_count":       self._step_count,
+            "done":             self._done,
+            "tools_used":       dict(self._tools_used),
+            "tool_cost_total":  round(self._tool_cost_total, 4),
+            "verdict_history":  list(self._verdict_history),
+            "deception_type":   self._scenario.get("deception", {}).get("type", "none"),
+            "expected_verdict": self._scenario.get("expected_verdict", "APPROVED"),
+        }
+
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     def _initial_context(self, episode: dict) -> str:
