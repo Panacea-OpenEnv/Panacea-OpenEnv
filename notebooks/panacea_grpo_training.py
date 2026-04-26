@@ -384,7 +384,7 @@ def train(model, tokenizer, dataset):
 
     batch_size = 2
     grad_accum = 2
-    num_epochs = 2  # 1350 train * 2 / (2*2) = ~1350 steps (>= 1000 target)
+    num_epochs = 1  # 1350 train * 2 / (2*2) = ~1350 steps (>= 1000 target)
 
     args = GRPOConfig(
         output_dir                  = "./panacea_grpo_out",
